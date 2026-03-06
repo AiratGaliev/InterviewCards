@@ -1,3 +1,7 @@
-from config.Config import Config
+"""
+Модуль конфигурации InterviewCards.
+"""
 
-__all__ = ['Config']
+from config.Config import AppConfig, get_config, Config
+
+__all__ = ['AppConfig', 'get_config', 'Config']

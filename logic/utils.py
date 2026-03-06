@@ -1,12 +1,44 @@
+"""
+Основной модуль логики приложения InterviewCards.
+Содержит функции для парсинга Markdown и генерации карточек.
+"""
+
 import glob
+import logging
 import os
 import re
-from typing import List, Dict
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import yaml
 
 from models.InterviewCard import InterviewCard
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Константы
+# =============================================================================
+
+# Паттерны для парсинга Markdown
+PATTERNS = {
+    'question_answer': r'### Вопрос:\s*(.+?)\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
+    'card_format': r'#card\n\n(.+?)\n:::\n(.+?)(?=#card|$)',
+    'header_content': r'^#\s*(.+?)\n\n---\n\n(.+?)(?=^#\s|#card|$)',
+    'code_block': r'```(?:python|javascript|java|sql|json|bash|typescript|go|rust)?\n(.+?)\n```',
+    'frontmatter': r'^---\n(.+?)\n---\n',
+    'header': r'^#\s*(.+?)$',
+}
+
+# Языки программирования для подсветки кода
+SUPPORTED_LANGUAGES = ['python', 'javascript', 'java', 'sql', 'json', 'bash', 'typescript', 'go', 'rust']
 
 
 # =============================================================================
@@ -14,128 +46,155 @@ from models.InterviewCard import InterviewCard
 # =============================================================================
 
 def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
-    """Рекурсивно загружает материалы из Markdown файлов, определяя категорию по имени папки."""
+    """
+    Рекурсивно загружает материалы из Markdown файлов,
+    определяя категорию по имени папки.
+
+    Args:
+        input_dir: Путь к папке с Markdown файлами
+
+    Returns:
+        Dict[str, Dict]: Словарь тем с метаданными
+    """
     topics = {}
 
     if not os.path.exists(input_dir):
+        logger.warning(f"Папка не найдена: {input_dir}")
         return topics
 
-    # Рекурсивно обходим все подпапки
-    for root, dirs, files in os.walk(input_dir):
-        for file in files:
-            if file.endswith('.md'):
-                file_path = os.path.join(root, file)
-                topic_name = file.replace('.md', '')
+    input_path = Path(input_dir)
 
-                # Определяем категорию как имя последней папки в пути относительно input_dir
-                rel_path = os.path.relpath(root, input_dir)
-                if rel_path == '.':
-                    category = 'general'  # файл в корне
-                else:
-                    # Берём первую часть пути (если вложенность глубже, можно скорректировать)
-                    category = rel_path.split(os.sep)[0]
+    for file_path in input_path.rglob('*.md'):
+        try:
+            topic_name = file_path.stem
 
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+            # Определяем категорию как имя первой подпапки
+            rel_path = file_path.relative_to(input_path)
+            if len(rel_path.parts) > 1:
+                category = rel_path.parts[0]
+            else:
+                category = 'general'
 
-                topics[topic_name] = {
-                    'content': content,
-                    'path': file_path,
-                    'category': category,
-                    'frontmatter': extract_frontmatter(content)
-                }
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
+            # Парсим frontmatter один раз
+            frontmatter = extract_frontmatter(content)
+
+            topics[topic_name] = {
+                'content': content,
+                'path': str(file_path),
+                'category': frontmatter.get('category', category),
+                'frontmatter': frontmatter,
+                'difficulty': frontmatter.get('difficulty', 'medium')
+            }
+
+        except Exception as e:
+            logger.error(f"Ошибка при чтении {file_path}: {e}")
+            continue
+
+    logger.info(f"Загружено тем: {len(topics)}")
     return topics
 
 
-def extract_frontmatter(content: str) -> dict:
-    """Извлечение frontmatter из Markdown"""
-    frontmatter_match = re.match(r'^---\n(.+?)\n---\n', content, re.DOTALL)
-    if frontmatter_match:
-        try:
-            frontmatter = yaml.safe_load(frontmatter_match.group(1))
-            return frontmatter if frontmatter else {}
-        except yaml.YAMLError:
-            return {}
-    return {}
+def extract_frontmatter(content: str) -> Dict:
+    """
+    Извлекает YAML frontmatter из Markdown контента.
+
+    Args:
+        content: Содержимое Markdown файла
+
+    Returns:
+        Dict: Распарсенный frontmatter или пустой словарь
+    """
+    match = re.match(PATTERNS['frontmatter'], content, re.DOTALL)
+    if not match:
+        return {}
+
+    try:
+        frontmatter = yaml.safe_load(match.group(1))
+        return frontmatter if isinstance(frontmatter, dict) else {}
+    except yaml.YAMLError as e:
+        logger.warning(f"Ошибка парсинга frontmatter: {e}")
+        return {}
 
 
-def extract_category_from_content(content: str) -> str:
-    """Извлечение категории из контента"""
-    # Пробуем извлечь из frontmatter
+def extract_card_metadata(content: str) -> Tuple[str, str, Dict]:
+    """
+    Извлекает метаданные карточки из контента.
+
+    Args:
+        content: Содержимое Markdown файла
+
+    Returns:
+        Tuple[str, str, Dict]: (категория, сложность, frontmatter)
+    """
     frontmatter = extract_frontmatter(content)
-    if 'category' in frontmatter:
-        return frontmatter['category']
 
-    # Пробуем из заголовка
-    match = re.search(r'^#\s*(.+?)$', content, re.MULTILINE)
-    if match:
-        return match.group(1).lower().replace(' ', '_')
+    # Категория из frontmatter или заголовка
+    category = frontmatter.get('category', 'general')
+    if category == 'general':
+        match = re.search(PATTERNS['header'], content, re.MULTILINE)
+        if match:
+            category = match.group(1).lower().replace(' ', '_')
 
-    return 'general'
+    # Сложность
+    difficulty = frontmatter.get('difficulty', 'medium')
+    if difficulty not in ['easy', 'medium', 'hard']:
+        difficulty = 'medium'
 
-
-def extract_difficulty(content: str) -> str:
-    """Извлечение уровня сложности"""
-    frontmatter = extract_frontmatter(content)
-    if 'difficulty' in frontmatter:
-        return frontmatter['difficulty']
-
-    if 'difficulty: hard' in content.lower() or '#hard' in content.lower():
-        return 'hard'
-    elif 'difficulty: easy' in content.lower() or '#easy' in content.lower():
-        return 'easy'
-    return 'medium'
+    return category, difficulty, frontmatter
 
 
-def parse_cards_from_markdown(file_path: str, card_id: int = 1) -> List[InterviewCard]:
-    """Парсинг карточек Spaced Repetition из Markdown файла"""
+def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
+    """
+    Парсит карточки Spaced Repetition из Markdown файла.
+
+    Args:
+        file_path: Путь к Markdown файлу
+        start_id: Начальный ID для карточек
+
+    Returns:
+        List[InterviewCard]: Список карточек
+    """
     cards = []
+    card_id = start_id
 
-    # 🔴 ДОБАВЬТЕ ТОЛЬКО ЭТИ СТРОКИ:
-    print(f"\n🔍 Парсинг: {file_path}")
-    print(f"📁 Файл существует: {os.path.exists(file_path)}")
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        logger.error(f"Ошибка чтения файла {file_path}: {e}")
+        return cards
 
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    topic_name = Path(file_path).stem
+    category, difficulty, frontmatter = extract_card_metadata(content)
 
-    print(f"📊 Длина: {len(content)} символов")
-    print(f"📊 'Вопрос:' в контенте: {'Вопрос:' in content}")
-    # 🔴 КОНЕЦ ОТЛАДКИ
-
-    topic_name = os.path.basename(file_path).replace('.md', '')
-    category = extract_category_from_content(content)
-    frontmatter = extract_frontmatter(content)
+    # Поиск вопросов по различным паттернам
+    all_questions: List[Tuple[str, str]] = []
 
     # Паттерн 1: ### Вопрос: ... Ответ: ...
-    questions_v1 = re.findall(
-        r'### Вопрос:\s*(.+?)\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
-        content, re.DOTALL
-    )
+    questions_v1 = re.findall(PATTERNS['question_answer'], content, re.DOTALL)
+    all_questions.extend(questions_v1)
 
     # Паттерн 2: #card формат (Obsidian_to_Anki)
-    questions_v2 = re.findall(
-        r'#card\n\n(.+?)\n:::\n(.+?)(?=#card|$)',
-        content, re.DOTALL
-    )
+    questions_v2 = re.findall(PATTERNS['card_format'], content, re.DOTALL)
+    all_questions.extend(questions_v2)
 
     # Паттерн 3: Заголовок как вопрос, контент после --- как ответ
-    questions_v3 = re.findall(
-        r'^#\s*(.+?)\n\n---\n\n(.+?)(?=^#\s|#card|$)',
-        content, re.MULTILINE | re.DOTALL
-    )
+    questions_v3 = re.findall(PATTERNS['header_content'], content, re.MULTILINE | re.DOTALL)
+    all_questions.extend(questions_v3)
 
-    all_questions = questions_v1 + questions_v2 + questions_v3
-
+    # Обработка найденных вопросов
     for q_text, a_text in all_questions:
-        code_snippets = re.findall(
-            r'```(?:python|javascript|java|sql|json|bash)?\n(.+?)\n```',
-            a_text, re.DOTALL
-        )
+        # Извлечение фрагментов кода из ответа
+        code_snippets = re.findall(PATTERNS['code_block'], a_text, re.DOTALL)
 
-        tags = frontmatter.get('tags', []) if isinstance(frontmatter.get('tags'), list) else []
+        # Обработка тегов
+        tags = frontmatter.get('tags', [])
         if isinstance(tags, str):
             tags = [tags]
+        tags = [tag for tag in tags if tag]
 
         card = InterviewCard(
             id=card_id,
@@ -144,7 +203,7 @@ def parse_cards_from_markdown(file_path: str, card_id: int = 1) -> List[Intervie
             question=q_text.strip(),
             answer=a_text.strip(),
             code_snippets=code_snippets,
-            difficulty=extract_difficulty(content),
+            difficulty=difficulty,
             tags=tags,
             source_note=topic_name,
             frontmatter=frontmatter
@@ -154,19 +213,17 @@ def parse_cards_from_markdown(file_path: str, card_id: int = 1) -> List[Intervie
             cards.append(card)
             card_id += 1
 
-    # Если не найдено вопросов, создаём одну карточку из всего контента
+    # Если вопросов не найдено, создаём карточку из всего контента
     if not cards:
+        logger.info(f"Структурированные вопросы не найдены в {topic_name}, создаём карточку из контента")
         card = InterviewCard(
             id=card_id,
             topic=topic_name,
             category=category,
             question=f"Расскажите о: {topic_name}",
             answer=content,
-            code_snippets=re.findall(
-                r'```(?:python|javascript|java|sql|json|bash)?\n(.+?)\n```',
-                content, re.DOTALL
-            ),
-            difficulty='medium',
+            code_snippets=re.findall(PATTERNS['code_block'], content, re.DOTALL),
+            difficulty=difficulty,
             tags=[category],
             source_note=topic_name,
             frontmatter=frontmatter
@@ -174,24 +231,35 @@ def parse_cards_from_markdown(file_path: str, card_id: int = 1) -> List[Intervie
         if card.validate():
             cards.append(card)
 
+    logger.info(f"Парсинг {topic_name}: найдено {len(cards)} карточек")
     return cards
 
 
 def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
-    """Парсинг всех Markdown файлов в директории"""
+    """
+    Парсит все Markdown файлы в директории.
+
+    Args:
+        input_dir: Путь к директории с файлами
+
+    Returns:
+        List[InterviewCard]: Список всех карточек
+    """
     all_cards = []
     card_id = 1
 
     if not os.path.exists(input_dir):
+        logger.warning(f"Директория не найдена: {input_dir}")
         return all_cards
 
-    for file in os.listdir(input_dir):
-        if file.endswith('.md'):
-            file_path = os.path.join(input_dir, file)
-            cards = parse_cards_from_markdown(file_path, card_id)
-            all_cards.extend(cards)
-            card_id += len(cards)
+    input_path = Path(input_dir)
 
+    for file_path in sorted(input_path.rglob('*.md')):
+        cards = parse_cards_from_markdown(str(file_path), card_id)
+        all_cards.extend(cards)
+        card_id += len(cards)
+
+    logger.info(f"Всего карточек: {len(all_cards)}")
     return all_cards
 
 
@@ -200,17 +268,36 @@ def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
 # =============================================================================
 
 def clean_text(text: str) -> str:
-    """Очистка текста от лишних символов"""
+    """
+    Очищает текст от лишних пробелов и переносов строк.
+
+    Args:
+        text: Исходный текст
+
+    Returns:
+        str: Очищенный текст
+    """
     if not text:
         return ""
+
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
-    text = text.strip()
-    return text
+    return text.strip()
 
 
 def escape_html(text: str) -> str:
-    """Экранирование HTML для Anki"""
+    """
+    Экранирует HTML-символы для Anki.
+
+    Args:
+        text: Исходный текст
+
+    Returns:
+        str: Экранированный текст
+    """
+    if not text:
+        return ""
+
     text = text.replace('&', '&amp;')
     text = text.replace('<', '&lt;')
     text = text.replace('>', '&gt;')
@@ -218,26 +305,58 @@ def escape_html(text: str) -> str:
 
 
 def format_code_for_anki(code: str, language: str = 'python') -> str:
-    """Форматирование кода для Anki"""
+    """
+    Форматирует код для отображения в Anki.
+
+    Args:
+        code: Исходный код
+        language: Язык программирования
+
+    Returns:
+        str: HTML-форматированный код
+    """
+    if not code:
+        return ""
+
     code = escape_html(code)
     code = code.replace('\n', '<br>')
     code = code.replace('  ', '&nbsp;&nbsp;')
-    return f'<pre style="background:#f4f4f4;padding:10px;border-radius:5px;overflow-x:auto;"><code>{code}</code></pre>'
+
+    return (
+        f'<pre style="background:#f4f4f4;padding:10px;'
+        f'border-radius:5px;overflow-x:auto;">'
+        f'<code class="language-{language}">{code}</code></pre>'
+    )
 
 
 def format_markdown_to_html(text: str) -> str:
-    """Конвертация Markdown в HTML для Anki"""
+    """
+    Конвертирует Markdown в HTML для Anki.
+
+    Args:
+        text: Текст в Markdown формате
+
+    Returns:
+        str: HTML-форматированный текст
+    """
+    if not text:
+        return ""
+
     # Жирный текст
     text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
     # Курсив
     text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text)
-    # Код в строке
-    text = re.sub(r'`([^`]+)`', r'<code style="background:#f0f0f0;padding:2px 5px;border-radius:3px;">\1</code>', text)
+    # Инлайн код
+    text = re.sub(
+        r'`([^`]+)`',
+        r'<code style="background:#f0f0f0;padding:2px 5px;border-radius:3px;">\1</code>',
+        text
+    )
     # Заголовки
     text = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
     text = re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
-    # Списки
+    # Маркированные списки
     text = re.sub(r'^\s*[-*]\s+(.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
     text = re.sub(r'(<li>.+</li>\n?)+', r'<ul>\g<0></ul>', text)
     # Нумерованные списки
@@ -245,23 +364,48 @@ def format_markdown_to_html(text: str) -> str:
     # Переносы строк
     text = text.replace('\n\n', '<br><br>')
     text = text.replace('\n', '<br>')
+
     return text
 
 
 def remove_obsidian_links(text: str) -> str:
-    """Удаление ссылок Obsidian для чистого Anki экспорта"""
+    """
+    Удаляет ссылки Obsidian для чистого Anki экспорта.
+
+    Args:
+        text: Текст с ссылками Obsidian
+
+    Returns:
+        str: Текст без ссылок
+    """
+    if not text:
+        return ""
+
     # [[Note#Section|Text]] -> Text
     text = re.sub(r'\[\[.*?\|(.+?)\]\]', r'\1', text)
     # [[Note]] -> Note
     text = re.sub(r'\[\[(.+?)\]\]', r'\1', text)
+
     return text
 
 
 def remove_spaced_repetition_tags(text: str) -> str:
-    """Удаление тегов Spaced Repetition для Anki"""
+    """
+    Удаляет теги Spaced Repetition для Anki.
+
+    Args:
+        text: Текст с тегами
+
+    Returns:
+        str: Очищенный текст
+    """
+    if not text:
+        return ""
+
     text = re.sub(r'#card\s*', '', text)
     text = re.sub(r'#interview\s*', '', text)
-    text = re.sub(r'#\w+\s*', '', text)
+    text = re.sub(r'#difficulty/\w+\s*', '', text)
+
     return text.strip()
 
 
@@ -270,47 +414,68 @@ def remove_spaced_repetition_tags(text: str) -> str:
 # =============================================================================
 
 def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
-    """Генерация карточки для Obsidian Spaced Repetition"""
-    # 🔴 Создаём директорию если не существует
+    """
+    Генерирует карточку для Obsidian Spaced Repetition.
+
+    Args:
+        card: Карточка для генерации
+        output_dir: Путь к папке вывода
+
+    Returns:
+        str: Путь к созданному файлу
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     markdown_content = card.to_markdown()
-
     file_path = os.path.join(output_dir, f"{card.topic}.md")
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(markdown_content)
 
-    print(f"📝 Создан файл: {file_path}")
+    logger.debug(f"Создан файл: {file_path}")
     return file_path
 
 
-def generate_obsidian_merged_file(cards: List[InterviewCard], category: str, output_dir: str) -> str:
-    """Генерация объединённого файла для категории (Obsidian_to_Anki формат)"""
-    # 🔴 Создаём директорию если не существует
+def generate_obsidian_merged_file(
+    cards: List[InterviewCard],
+    category: str,
+    output_dir: str
+) -> str:
+    """
+    Генерирует объединённый файл для категории (Obsidian_to_Anki формат).
+
+    Args:
+        cards: Список карточек
+        category: Имя категории
+        output_dir: Путь к папке вывода
+
+    Returns:
+        str: Путь к созданному файлу
+    """
     os.makedirs(output_dir, exist_ok=True)
 
-    content = ""
+    content_parts = []
 
     for card in cards:
         answer = card.answer
         answer = remove_obsidian_links(answer)
         answer = remove_spaced_repetition_tags(answer)
 
-        content += f"#card\n\n{card.question}\n:::\n{answer}\n\n"
+        content_parts.append(f"#card\n\n{card.question}\n:::\n{answer}\n")
 
         if card.code_snippets:
             for snippet in card.code_snippets:
-                content += f"```python\n{snippet}\n```\n\n"
+                content_parts.append(f"```python\n{snippet}\n```\n")
 
-        content += "---\n\n"
+        content_parts.append("---\n")
 
+    content = '\n'.join(content_parts)
     file_path = os.path.join(output_dir, f"{category}.md")
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    print(f"📝 Создан файл: {file_path}")
+    logger.info(f"Создан объединённый файл: {file_path}")
     return file_path
 
 
@@ -319,20 +484,34 @@ def generate_obsidian_merged_file(cards: List[InterviewCard], category: str, out
 # =============================================================================
 
 def generate_anki_import_file(
-        cards: List[InterviewCard],
-        category: str,
-        output_path: str,
-        deck_prefix: str = "Interview"
+    cards: List[InterviewCard],
+    category: str,
+    output_path: str,
+    deck_prefix: str = "Interview"
 ) -> str:
-    """Генерация файла для импорта в Anki"""
-    # 🔴 Создаём директорию если не существует
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    """
+    Генерирует файл для импорта в Anki.
+
+    Args:
+        cards: Список карточек
+        category: Имя категории
+        output_path: Путь к файлу вывода
+        deck_prefix: Префикс имени колоды
+
+    Returns:
+        str: Путь к созданному файлу
+    """
+    # Создаём директорию если нужно
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
 
+    # Заголовок Anki import
     header = "#separator:tab\n#html:true\n#deck column:3\n#tags column:5\n"
 
-    cards_content = ""
+    cards_lines = []
     for card in cards:
         front = format_markdown_to_html(card.question)
         back = format_markdown_to_html(card.answer)
@@ -340,19 +519,23 @@ def generate_anki_import_file(
         back = remove_obsidian_links(back)
         back = remove_spaced_repetition_tags(back)
 
+        # Добавляем фрагменты кода
         if card.code_snippets:
             for snippet in card.code_snippets:
                 back += "<br>" + format_code_for_anki(snippet)
 
-        tags = ' '.join([f"interview/{tag}" for tag in card.tags] +
+        # Формируем теги
+        tags = ' '.join([f"interview/{tag}" for tag in card.tags if tag] +
                         [f"difficulty/{card.difficulty}"])
 
-        cards_content += f"{front}\t{back}\t{deck_name}\t\t{tags}\n"
+        cards_lines.append(f"{front}\t{back}\t{deck_name}\t\t{tags}")
+
+    content = header + '\n'.join(cards_lines)
 
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(header + cards_content)
+        f.write(content)
 
-    print(f"📝 Создан файл: {output_path}")
+    logger.info(f"Создан файл Anki: {output_path}")
     return output_path
 
 
@@ -361,15 +544,30 @@ def generate_anki_import_file(
 # =============================================================================
 
 def clean_up_duplicates(file_paths: List[str]) -> int:
-    """Удаление дубликатов вопросов по тексту вопроса"""
+    """
+    Удаляет дубликаты вопросов из файлов Anki.
+
+    Args:
+        file_paths: Список путей к файлам
+
+    Returns:
+        int: Количество удалённых дубликатов
+    """
     dfs: List[pd.DataFrame] = []
 
     for file_path in file_paths:
         if os.path.exists(file_path):
             try:
-                df = pd.read_csv(file_path, header=None, names=['question', 'answer', 'deck', 'empty', 'tags'])
+                df = pd.read_csv(
+                    file_path,
+                    header=None,
+                    names=['question', 'answer', 'deck', 'empty', 'tags'],
+                    sep='\t',
+                    on_bad_lines='skip'
+                )
                 dfs.append(df)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Ошибка чтения {file_path}: {e}")
                 continue
 
     if not dfs:
@@ -381,6 +579,7 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
     final_count = len(combined_df)
     removed_count = initial_count - final_count
 
+    # Разбиваем обратно по файлам
     split_dfs = []
     start_idx = 0
     for df in dfs:
@@ -390,36 +589,58 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
         start_idx = end_idx
 
     for i, df in enumerate(split_dfs):
-        df.to_csv(file_paths[i], index=False, header=False)
+        df.to_csv(file_paths[i], index=False, header=False, sep='\t')
 
+    logger.info(f"Удалено дубликатов: {removed_count}")
     return removed_count
 
 
 def natural_sort(file_paths: List[str]) -> List[str]:
-    """Естественная сортировка файлов"""
+    """
+    Естественная сортировка файлов (1, 2, 10 вместо 1, 10, 2).
 
-    def atoi(text):
-        return int(text) if text.isdigit() else text
+    Args:
+        file_paths: Список путей к файлам
 
-    def natural_keys(text):
-        return [atoi(c) for c in re.split(r'(\d+)', text)]
+    Returns:
+        List[str]: Отсортированный список
+    """
+    def natural_key(text: str) -> List:
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
 
-    return sorted(file_paths, key=natural_keys)
+    return sorted(file_paths, key=natural_key)
 
 
 def get_markdown_files(folder_paths: List[str]) -> List[str]:
-    """Получение списка Markdown файлов"""
+    """
+    Получает список Markdown файлов из папок.
+
+    Args:
+        folder_paths: Список путей к папкам
+
+    Returns:
+        List[str]: Список путей к файлам
+    """
     file_paths = []
+
     for folder_path in folder_paths:
         if os.path.exists(folder_path):
-            files = glob.glob(os.path.join(folder_path, '*.md'))
+            files = glob.glob(os.path.join(folder_path, '**/*.md'), recursive=True)
             file_paths.extend(files)
+
     return natural_sort(file_paths)
 
 
 def validate_markdown_structure(content: str) -> bool:
-    """Валидация структуры Markdown"""
-    # Проверяем наличие хотя бы одного вопроса или карточки
+    """
+    Проверяет структуру Markdown на наличие карточек.
+
+    Args:
+        content: Содержимое Markdown файла
+
+    Returns:
+        bool: True если структура валидна
+    """
     has_question = bool(re.search(r'### Вопрос:', content))
     has_card = bool(re.search(r'#card', content))
     has_header = bool(re.search(r'^#\s+', content, re.MULTILINE))
@@ -427,36 +648,24 @@ def validate_markdown_structure(content: str) -> bool:
     return has_question or has_card or has_header
 
 
-async def validate_markdown_file_async(file_path: str) -> Dict:
-    """Асинхронная валидация Markdown файла"""
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        is_valid = validate_markdown_structure(content)
-        cards_count = len(re.findall(r'#card', content))
-
-        return {
-            'valid': is_valid,
-            'path': file_path,
-            'cards_count': cards_count if cards_count > 0 else 1,
-            'category': extract_category_from_content(content)
-        }
-    except Exception as e:
-        return {
-            'valid': False,
-            'path': file_path,
-            'error': str(e)
-        }
-
-
 def process_cards_batch(
-        cards: List[InterviewCard],
-        category: str,
-        output_dir: str,
-        batch_size: int = 500
+    cards: List[InterviewCard],
+    category: str,
+    output_dir: str,
+    batch_size: int = 500
 ) -> List[str]:
-    """Обработка карточек батчами для больших наборов данных"""
+    """
+    Обрабатывает карточки батчами для больших наборов данных.
+
+    Args:
+        cards: Список карточек
+        category: Имя категории
+        output_dir: Путь к папке вывода
+        batch_size: Размер батча
+
+    Returns:
+        List[str]: Список путей к созданным файлам
+    """
     output_files = []
 
     for i in range(0, len(cards), batch_size):
@@ -465,8 +674,8 @@ def process_cards_batch(
         total_batches = (len(cards) + batch_size - 1) // batch_size
 
         category_name = f"{category}_part{batch_num}" if total_batches > 1 else category
-
         output_path = os.path.join(output_dir, f"{category_name}.txt")
+
         generate_anki_import_file(batch, category_name, output_path)
         output_files.append(output_path)
 
@@ -474,28 +683,45 @@ def process_cards_batch(
 
 
 def generate_all_formats(
-        cards: List[InterviewCard],
-        category: str,
-        cards_output: str,  # 🔴 Путь к Cards в Vault
-        anki_output: str,
-        materials_path: str = None  # 🔴 Путь к Materials для ссылок
+    cards: List[InterviewCard],
+    category: str,
+    cards_output: str,
+    anki_output: str,
+    materials_path: Optional[str] = None
 ) -> List[str]:
-    """Генерация всех форматов вывода"""
+    """
+    Генерирует все форматы вывода карточек.
+
+    Args:
+        cards: Список карточек
+        category: Имя категории
+        cards_output: Путь к папке карточек Obsidian
+        anki_output: Путь к папке файлов Anki
+        materials_path: Путь к папке материалов (для ссылок)
+
+    Returns:
+        List[str]: Список путей к созданным файлам
+    """
     output_files: List[str] = []
 
-    print(f"\n🔵 Генерация для категории: {category}")
-    print(f"📂 Cards путь: {cards_output}")
-    print(f"📂 Materials путь: {materials_path}")
-    print(f"📂 Anki путь: {anki_output}")
+    logger.info(f"Генерация для категории: {category}")
+    logger.info(f"Cards путь: {cards_output}")
+    logger.info(f"Anki путь: {anki_output}")
 
     # Создаём директории
     os.makedirs(cards_output, exist_ok=True)
     os.makedirs(os.path.join(cards_output, 'anki_sync'), exist_ok=True)
     os.makedirs(anki_output, exist_ok=True)
 
-    # Obsidian карточки (в Vault/Cards)
+    # Обновляем ссылки на материалы
     for card in cards:
-        card.source_note = f"Interview/Materials/{category}/{card.topic}" if materials_path else card.topic  # ✅ Правильная ссылка
+        if materials_path:
+            card.source_note = f"Interview/Materials/{category}/{card.topic}"
+        else:
+            card.source_note = card.topic
+
+    # Obsidian карточки
+    for card in cards:
         file_path = generate_obsidian_card(card, cards_output)
         output_files.append(file_path)
 
@@ -507,7 +733,7 @@ def generate_all_formats(
     )
     output_files.append(merged_file)
 
-    # Anki Import (без ссылок)
+    # Anki Import
     anki_file = generate_anki_import_file(
         cards,
         category,
@@ -515,5 +741,5 @@ def generate_all_formats(
     )
     output_files.append(anki_file)
 
-    print(f"✅ Сгенерировано файлов: {len(output_files)}")
+    logger.info(f"Сгенерировано файлов: {len(output_files)}")
     return output_files

@@ -1,5 +1,5 @@
 ---
-tags: [ interview/python ]
+tags: [interview/python]
 difficulty: medium
 category: python
 ---
@@ -35,3 +35,6 @@ from multiprocessing import Pool
 
 with Pool(4) as p:
     results = p.map(lambda x: x * x, range(10))
+```
+
+#card #interview

@@ -1,126 +1,148 @@
+"""
+CLI версия генератора карточек InterviewCards.
+"""
+
 import os
-import shutil
 import sys
 
-from config.Config import Config
-from logic.utils import (
-    load_markdown_topics,
-    parse_cards_from_markdown,
-    generate_all_formats,
-    clean_up_duplicates
-)
+from config.Config import get_config
+from logic.core import CardGenerator, GenerationResult
 
 
-def main():
-    categories: list[str] = Config.CATEGORIES_LIST.value
-    documents = Config.DOCUMENTS.value
-    output_dir = Config.OUTPUT.value
-    obsidian_vault = Config.OBSIDIAN_VAULT.value
-    materials_source = Config.MATERIALS_SOURCE.value
-
+def print_header():
+    """Выводит заголовок приложения"""
     print("=" * 60)
     print("📚 Interview Cards - Генератор карточек (Markdown Only)")
     print("=" * 60)
 
-    input_dir = input(
-        f"Путь к папке с Markdown темами (по умолчанию: {materials_source}): "
-    )
+
+def print_result(result: GenerationResult):
+    """Выводит результат генерации"""
+    print("-" * 60)
+
+    if result.success:
+        print(f"🏁 Готово! Сгенерировано {result.total_cards} карточек")
+        print(f"   Тем обработано: {result.topics_processed}")
+        print(f"   Файлов создано: {len(result.output_files)}")
+    else:
+        print("❌ Генерация не удалась")
+        for error in result.errors:
+            print(f"   Ошибка: {error}")
+
+    if result.warnings:
+        print("\n⚠️ Предупреждения:")
+        for warning in result.warnings:
+            print(f"   {warning}")
+
+
+def print_output_paths(generator: CardGenerator):
+    """Выводит пути вывода"""
+    paths = generator.get_output_paths()
+    print(f"\n📂 Результаты:")
+    print(f"   Obsidian карточки: {paths['cards']}")
+    print(f"   Obsidian материалы: {paths['materials']}")
+    print(f"   Anki файлы: {paths['anki']}")
+
+
+def get_user_input(config) -> tuple:
+    """
+    Получает ввод от пользователя.
+
+    Returns:
+        tuple: (input_dir, selected_categories, clean_duplicates)
+    """
+    # Путь к папке
+    default_path = config.materials_source
+    input_dir = input(f"\nПуть к папке с Markdown темами (по умолчанию: {default_path}): ").strip()
+
     if not input_dir:
-        input_dir = materials_source
+        input_dir = default_path
 
-    if not os.path.exists(input_dir):
-        print(f"❌ Папка не найдена: {input_dir}")
-        create = input("Создать папку с примером? y/n: ").lower()
-        if create == 'y':
-            os.makedirs(input_dir, exist_ok=True)
-            example_path = os.path.join(input_dir, "example_topic.md")
-            template_path = os.path.join(os.path.dirname(__file__), "templates", "example_topic.md")
-            if os.path.exists(template_path):
-                with open(template_path, 'r', encoding='utf-8') as f:
-                    example_content = f.read()
-            else:
-                example_content = """# Пример темы\n\n### Вопрос: Что такое GIL?\nОтвет: Global Interpreter Lock...\n"""
-            with open(example_path, 'w', encoding='utf-8') as f:
-                f.write(example_content)
+    # Категории
+    print(f"\nДоступные категории: {', '.join(config.categories)}")
+    categories_input = input("Выберите категории (через запятую, или 'all'): ").strip()
+
+    if categories_input.lower() == 'all' or not categories_input:
+        selected_categories = None  # Все категории
+    else:
+        selected_categories = [c.strip() for c in categories_input.split(',') if c.strip()]
+
+    # Дубликаты
+    clean_input = input("Удалить дубликаты? (y/n, по умолчанию n): ").strip().lower()
+    clean_duplicates = clean_input == 'y'
+
+    return input_dir, selected_categories, clean_duplicates
+
+
+def handle_missing_directory(generator: CardGenerator, input_dir: str) -> bool:
+    """
+    Обрабатывает случай отсутствующей директории.
+
+    Returns:
+        bool: True если директория создана, False если нет
+    """
+    print(f"❌ Папка не найдена: {input_dir}")
+    create = input("Создать папку с примером? (y/n): ").strip().lower()
+
+    if create == 'y':
+        try:
+            template_path = os.path.join(
+                os.path.dirname(__file__),
+                "templates",
+                "example_topic.md"
+            )
+            example_path = generator.create_example_file(input_dir, template_path)
             print(f"✅ Пример создан: {example_path}")
-        else:
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка создания примера: {e}")
+            return False
+
+    return False
+
+
+def main():
+    """Главная функция CLI приложения"""
+    print_header()
+
+    # Загрузка конфигурации
+    config = get_config()
+    config.create_directories()
+
+    generator = CardGenerator(config)
+
+    # Получение ввода
+    input_dir, selected_categories, clean_duplicates = get_user_input(config)
+
+    # Проверка директории
+    if not os.path.exists(input_dir):
+        if not handle_missing_directory(generator, input_dir):
             sys.exit(1)
-    else:
-        print(f"✅ Папка найдена: {input_dir}")
-        topics = load_markdown_topics(input_dir)
-        print(f"📁 Тем найдено: {len(topics)}")
 
-    print(f"\nДоступные категории: {', '.join(categories)}")
-    selected_categories_input = input("Выберите категории (через запятую, или all): ")
-    if selected_categories_input.strip().lower() == 'all' or not selected_categories_input.strip():
-        selected_categories = categories
-    else:
-        selected_categories = [c.strip() for c in selected_categories_input.split(',')]
+    # Валидация
+    is_valid, message = generator.validate_input_directory(input_dir)
+    if not is_valid:
+        print(f"❌ {message}")
+        sys.exit(1)
 
-    print("\nФорматы вывода:")
-    print("1. Obsidian (со ссылками)")
-    print("2. Obsidian_to_Anki")
-    print("3. Anki Import")
-    format_input = input("Выберите форматы (через запятую, например 1,3): ").strip()
-    output_formats = [int(x.strip()) for x in format_input.split(',')] if format_input else [1, 3]
-
-    is_clean_duplicates = input("Удалить дубликаты? y/n (по умолчанию n): ").lower() == 'y'
-
+    print(f"\n✅ {message}")
     print("\n🚀 Начало генерации...")
-    print("-" * 60)
 
-    output_files = []
-    total_generated = 0
-    card_id = 1
+    # Генерация
+    result = generator.generate(
+        input_dir=input_dir,
+        selected_categories=selected_categories,
+        clean_duplicates=clean_duplicates
+    )
 
-    topics = load_markdown_topics(input_dir)
+    # Вывод результата
+    print_result(result)
+    print_output_paths(generator)
 
-    for topic_name, topic_data in topics.items():
-        topic_category = topic_data.get('category', 'general')
-        if selected_categories and topic_category not in selected_categories:
-            continue
-
-        cards = parse_cards_from_markdown(topic_data['path'], card_id)
-        card_id += len(cards)
-
-        if not cards:
-            print(f"⚠️ Нет валидных карточек в теме '{topic_name}'")
-            continue
-
-        materials_path = os.path.join(obsidian_vault, "Interview", "Materials", topic_category)
-        cards_path = os.path.join(obsidian_vault, "Interview", "Cards", topic_category)
-        anki_path = os.path.join(output_dir, "anki")
-
-        input_file = topic_data['path']
-        material_file = os.path.join(materials_path, f"{topic_name}.md")
-        os.makedirs(materials_path, exist_ok=True)
-
-        if os.path.abspath(input_file) != os.path.abspath(material_file):
-            try:
-                shutil.copy2(input_file, material_file)
-            except PermissionError as e:
-                print(f"⚠️ Не удалось скопировать {topic_name}: файл занят или нет прав.")
-        else:
-            pass
-
-        files = generate_all_formats(cards, topic_category, cards_path, anki_path, materials_path)
-        output_files.extend(files)
-        total_generated += len(cards)
-        print(f"✅ Тема '{topic_name}': {len(cards)} карточек")
-
-    if is_clean_duplicates and output_files:
-        txt_files = [f for f in output_files if f.endswith('.txt')]
-        if txt_files:
-            removed = clean_up_duplicates(txt_files)
-            if removed > 0:
-                print(f"🧹 Удалено дубликатов: {removed}")
-
-    print("-" * 60)
-    print(f"🏁 Готово! Сгенерировано {total_generated} карточек")
-    print(f"📂 Obsidian карточки: {obsidian_vault}/Interview/Cards/")
-    print(f"📂 Obsidian материалы: {obsidian_vault}/Interview/Materials/")
-    print(f"📂 Anki файлы: {anki_path}/")
     print("=" * 60)
+
+    # Код возврата
+    sys.exit(0 if result.success else 1)
 
 
 if __name__ == '__main__':

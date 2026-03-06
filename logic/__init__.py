@@ -1,19 +1,42 @@
+"""
+Модуль логики InterviewCards.
+"""
+
 from logic.utils import (
     load_markdown_topics,
     parse_cards_from_markdown,
+    parse_all_markdown_files,
     generate_obsidian_card,
     generate_obsidian_merged_file,
     generate_anki_import_file,
     generate_all_formats,
-    clean_up_duplicates
+    clean_up_duplicates,
+    extract_frontmatter,
+    format_markdown_to_html,
+    remove_obsidian_links,
+    remove_spaced_repetition_tags,
+    validate_markdown_structure,
+    process_cards_batch,
 )
+from logic.core import CardGenerator, GenerationResult
 
 __all__ = [
+    # utils
     'load_markdown_topics',
     'parse_cards_from_markdown',
+    'parse_all_markdown_files',
     'generate_obsidian_card',
     'generate_obsidian_merged_file',
     'generate_anki_import_file',
     'generate_all_formats',
-    'clean_up_duplicates'
+    'clean_up_duplicates',
+    'extract_frontmatter',
+    'format_markdown_to_html',
+    'remove_obsidian_links',
+    'remove_spaced_repetition_tags',
+    'validate_markdown_structure',
+    'process_cards_batch',
+    # core
+    'CardGenerator',
+    'GenerationResult',
 ]

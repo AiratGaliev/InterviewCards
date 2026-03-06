@@ -1,3 +1,7 @@
-from models.InterviewCard import InterviewCard
+"""
+Модели данных InterviewCards.
+"""
 
-__all__ = ['InterviewCard']
+from models.InterviewCard import InterviewCard, MAX_QUESTION_LENGTH, MAX_ANSWER_LENGTH
+
+__all__ = ['InterviewCard', 'MAX_QUESTION_LENGTH', 'MAX_ANSWER_LENGTH']

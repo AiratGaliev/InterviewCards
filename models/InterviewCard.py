@@ -1,68 +1,170 @@
+"""
+Модель карточки для подготовки к интервью (Spaced Repetition).
+Представляет собой dataclass с методами валидации и конвертации.
+"""
+
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
+
+
+# Константы для валидации
+MAX_QUESTION_LENGTH = 2000
+MAX_ANSWER_LENGTH = 5000
+VALID_DIFFICULTIES = frozenset(['easy', 'medium', 'hard'])
 
 
 @dataclass
 class InterviewCard:
-    """Модель карточки для подготовки к интервью (Spaced Repetition)"""
+    """
+    Модель карточки для подготовки к интервью.
+
+    Attributes:
+        id: Уникальный идентификатор карточки
+        topic: Тема карточки
+        category: Категория (python, javascript, etc.)
+        question: Текст вопроса
+        answer: Текст ответа
+        code_snippets: Список фрагментов кода
+        difficulty: Уровень сложности (easy, medium, hard)
+        tags: Список тегов
+        source_note: Имя исходной заметки для ссылок
+        frontmatter: Метаданные из YAML frontmatter
+        created_at: Дата создания
+        updated_at: Дата последнего обновления
+    """
     id: int
     topic: str
     category: str
     question: str
     answer: str
     code_snippets: List[str] = field(default_factory=list)
-    difficulty: str = "medium"  # easy, medium, hard
+    difficulty: str = "medium"
     tags: List[str] = field(default_factory=list)
     source_note: Optional[str] = None
-    frontmatter: Optional[dict] = field(default_factory=dict)
+    frontmatter: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
+    def __post_init__(self):
+        """Пост-инициализация: нормализация данных"""
+        # Нормализация сложности
+        if self.difficulty not in VALID_DIFFICULTIES:
+            self.difficulty = "medium"
+
+        # Очистка строковых полей
+        self.question = self.question.strip() if self.question else ""
+        self.answer = self.answer.strip() if self.answer else ""
+        self.topic = self.topic.strip() if self.topic else ""
+        self.category = self.category.strip() if self.category else "general"
+
     def validate(self) -> bool:
-        """Валидация карточки"""
+        """
+        Валидация карточки.
+
+        Returns:
+            bool: True если карточка валидна, иначе False
+        """
+        # Проверка наличия обязательных полей
         if not self.question or not self.answer:
             return False
-        if len(self.question) > 2000:
+
+        # Проверка длины полей
+        if len(self.question) > MAX_QUESTION_LENGTH:
+            print(f"⚠️ Вопрос слишком длинный: {len(self.question)} символов")
             return False
-        if len(self.answer) > 5000:
+
+        if len(self.answer) > MAX_ANSWER_LENGTH:
+            print(f"⚠️ Ответ слишком длинный: {len(self.answer)} символов")
             return False
+
         return True
 
     def has_code(self) -> bool:
-        """Проверка наличия кода"""
-        return len(self.code_snippets) > 0
+        """Проверяет наличие фрагментов кода"""
+        return bool(self.code_snippets)
+
+    def get_formatted_tags(self) -> str:
+        """Возвращает отформатированную строку тегов для Obsidian"""
+        if not self.tags:
+            return "interview/general"
+        return ', '.join([f'interview/{tag}' for tag in self.tags if tag])
 
     def to_markdown(self) -> str:
-        """Конвертация в Markdown формат для Obsidian"""
-        tags_str = ', '.join([f'interview/{tag}' for tag in self.tags])
-
-        frontmatter = f"""---
-        tags: [{tags_str}]
-        created: {self.created_at.strftime('%Y-%m-%d')}
-        updated: {self.updated_at.strftime('%Y-%m-%d')}
-        source: "[[{self.source_note}]]"
-        difficulty: {self.difficulty}
-        category: {self.category}
-        ---
-        
         """
-        content = f"# {self.question}\n\n---\n\n{self.answer}\n\n"
+        Конвертирует карточку в Markdown формат для Obsidian.
 
+        Returns:
+            str: Markdown-контент карточки
+        """
+        # Frontmatter без лишних отступов (важно для YAML-парсера)
+        frontmatter_lines = [
+            "---",
+            f"tags: [{self.get_formatted_tags()}]",
+            f"created: {self.created_at.strftime('%Y-%m-%d')}",
+            f"updated: {self.updated_at.strftime('%Y-%m-%d')}",
+            f"source: \"[[{self.source_note}]]\"" if self.source_note else "source: ",
+            f"difficulty: {self.difficulty}",
+            f"category: {self.category}",
+            "---",
+            "",
+        ]
+        frontmatter = '\n'.join(frontmatter_lines)
+
+        # Основной контент
+        content_lines = [f"# {self.question}", "", "---", "", self.answer, ""]
+
+        # Добавляем примеры кода
         if self.code_snippets:
-            content += "## Примеры кода\n\n"
+            content_lines.append("## Примеры кода")
+            content_lines.append("")
             for snippet in self.code_snippets:
-                content += f"```python\n{snippet}\n```\n\n"
+                content_lines.append(f"```python\n{snippet}\n```")
+                content_lines.append("")
 
+        # Ссылка на исходный материал
         if self.source_note:
-            content += f"[[{self.source_note}|📎 Полный материал]]\n\n"
+            content_lines.append(f"[[{self.source_note}|📎 Полный материал]]")
+            content_lines.append("")
 
-        content += "#card #interview\n"
+        # Теги Spaced Repetition
+        content_lines.append("#card #interview")
+
+        content = '\n'.join(content_lines)
 
         return frontmatter + content
 
-    def to_dict(self) -> dict:
-        """Конвертация в словарь"""
+    def to_anki_format(self, include_deck: bool = True, deck_prefix: str = "Interview") -> str:
+        """
+        Конвертирует карточку в формат для импорта в Anki.
+
+        Args:
+            include_deck: Включать ли имя колоды
+            deck_prefix: Префикс имени колоды
+
+        Returns:
+            str: Строка в формате Anki import
+        """
+        # Базовое форматирование (без HTML, простой текст)
+        front = self.question.replace('\n', '<br>')
+        back = self.answer.replace('\n', '<br>')
+
+        # Формируем теги
+        tags = ' '.join([f"interview/{tag}" for tag in self.tags] + [f"difficulty/{self.difficulty}"])
+
+        if include_deck:
+            deck_name = f"{deck_prefix}::{self.category.replace('_', ' ').title()}"
+            return f"{front}\t{back}\t{deck_name}\t\t{tags}"
+        else:
+            return f"{front}\t{back}\t\t{tags}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Конвертирует карточку в словарь для сериализации.
+
+        Returns:
+            dict: Словарь с данными карточки
+        """
         return {
             'id': self.id,
             'topic': self.topic,
@@ -73,17 +175,42 @@ class InterviewCard:
             'difficulty': self.difficulty,
             'tags': self.tags,
             'source_note': self.source_note,
+            'frontmatter': self.frontmatter,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat()
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> 'InterviewCard':
-        """Создание из словаря"""
+    def from_dict(cls, data: Dict[str, Any]) -> 'InterviewCard':
+        """
+        Создаёт карточку из словаря.
+
+        Args:
+            data: Словарь с данными карточки
+
+        Returns:
+            InterviewCard: Новый экземпляр карточки
+        """
+        # Парсинг дат
+        created_at = datetime.now()
+        updated_at = datetime.now()
+
+        if 'created_at' in data and data['created_at']:
+            try:
+                created_at = datetime.fromisoformat(data['created_at'])
+            except (ValueError, TypeError):
+                pass
+
+        if 'updated_at' in data and data['updated_at']:
+            try:
+                updated_at = datetime.fromisoformat(data['updated_at'])
+            except (ValueError, TypeError):
+                pass
+
         return cls(
             id=data.get('id', 0),
             topic=data.get('topic', ''),
-            category=data.get('category', ''),
+            category=data.get('category', 'general'),
             question=data.get('question', ''),
             answer=data.get('answer', ''),
             code_snippets=data.get('code_snippets', []),
@@ -91,6 +218,14 @@ class InterviewCard:
             tags=data.get('tags', []),
             source_note=data.get('source_note'),
             frontmatter=data.get('frontmatter', {}),
-            created_at=datetime.fromisoformat(data['created_at']) if 'created_at' in data else datetime.now(),
-            updated_at=datetime.fromisoformat(data['updated_at']) if 'updated_at' in data else datetime.now()
+            created_at=created_at,
+            updated_at=updated_at
         )
+
+    def __str__(self) -> str:
+        """Строковое представление карточки"""
+        return f"InterviewCard(id={self.id}, topic='{self.topic}', category='{self.category}')"
+
+    def __repr__(self) -> str:
+        """Официальное строковое представление"""
+        return self.__str__()
