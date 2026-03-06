@@ -1,10 +1,11 @@
 # 📚 Interview Cards
 
-Генератор карточек для подготовки к техническим собеседованиям с поддержкой Obsidian и Anki.
+Генератор карточек Spaced Repetition из Markdown для подготовки к техническим собеседованиям.
 
 ## 🚀 Возможности
 
-- ✅ Импорт из JSON и Markdown (AI-генерация)
+- ✅ **Markdown формат**
+- ✅ Парсинг карточек Spaced Repetition (#card)
 - ✅ Генерация карточек Obsidian Spaced Repetition
 - ✅ Генерация карточек Obsidian_to_Anki
 - ✅ Генерация файлов для импорта в Anki
@@ -14,6 +15,7 @@
 - ✅ Streamlit UI и CLI версии
 - ✅ Форматирование Markdown в HTML
 - ✅ Подсветка кода в карточках
+- ✅ Frontmatter поддержка (YAML)
 
 ## 📋 Требования
 

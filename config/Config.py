@@ -37,3 +37,23 @@ class Config(Enum):
     MAX_QUESTIONS_PER_DECK: int = int(_config['limits']['max_questions_per_deck'])
     MAX_QUESTION_LENGTH: int = int(_config['limits']['max_question_length'])
     MAX_ANSWER_LENGTH: int = int(_config['limits']['max_answer_length'])
+
+    CARD_TAG: str = _config['spaced_repetition']['card_tag']
+    TOPIC_TAG: str = _config['spaced_repetition']['topic_tag']
+    DIFFICULTY_TAG_PREFIX: str = _config['spaced_repetition']['difficulty_tag_prefix']
+
+    @staticmethod
+    def create_directories():
+        """Создание всех необходимых директорий"""
+        dirs = [
+            Config.DOCUMENTS.value,
+            Config.OUTPUT.value,
+            os.path.join(Config.OUTPUT.value, 'anki'),
+            Config.OBSIDIAN_VAULT.value,
+            os.path.join(Config.OBSIDIAN_VAULT.value, 'Interview', 'Materials'),
+            os.path.join(Config.OBSIDIAN_VAULT.value, 'Interview', 'Cards'),
+            os.path.join(Config.DOCUMENTS.value, 'input', 'interview_topics'),
+        ]
+        for dir_path in dirs:
+            os.makedirs(dir_path, exist_ok=True)
+            print(f"✅ Директория создана: {dir_path}")

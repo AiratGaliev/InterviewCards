@@ -15,5 +15,6 @@ if not exist .venv (
 ) else (
     call .venv\Scripts\activate
 )
+streamlit cache clear
 streamlit run start.py
 deactivate

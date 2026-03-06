@@ -1,61 +1,20 @@
-import asyncio
 import glob
-import json
 import os
 import re
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime
+from typing import List, Dict
 
 import pandas as pd
-import aiohttp
-import streamlit as st
+import yaml
 
 from models.InterviewCard import InterviewCard
 
 
 # =============================================================================
-# Загрузка и парсинг данных
+# Загрузка и парсинг Markdown файлов
 # =============================================================================
 
-def load_json_questions(file_path: str) -> List[Dict]:
-    """Загрузка вопросов из JSON файла"""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Файл не найден: {file_path}")
-
-    with open(file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    if isinstance(data, dict) and 'questions' in data:
-        return data['questions']
-    elif isinstance(data, list):
-        return data
-    else:
-        raise ValueError(
-            "Неверный формат JSON. Ожидается массив вопросов или объект с ключом 'questions'"
-        )
-
-
-def load_categories_questions(file_path: str) -> Dict[str, List[Dict]]:
-    """Загрузка вопросов по категориям из JSON"""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    if isinstance(data, dict):
-        return data
-    elif isinstance(data, list):
-        categorized = {}
-        for item in data:
-            category = item.get('category', 'uncategorized')
-            if category not in categorized:
-                categorized[category] = []
-            categorized[category].append(item)
-        return categorized
-    else:
-        raise ValueError("Неверный формат JSON")
-
-
 def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
-    """Загрузка AI-сгенерированных материалов из Markdown файлов"""
+    """Загрузка материалов из Markdown файлов"""
     topics = {}
 
     if not os.path.exists(input_dir):
@@ -64,40 +23,109 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
     for file in os.listdir(input_dir):
         if file.endswith('.md'):
             topic_name = file.replace('.md', '')
-            with open(os.path.join(input_dir, file), 'r', encoding='utf-8') as f:
+            file_path = os.path.join(input_dir, file)
+
+            with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             topics[topic_name] = {
                 'content': content,
-                'path': os.path.join(input_dir, file),
-                'category': extract_category_from_content(content)
+                'path': file_path,
+                'category': extract_category_from_content(content),
+                'frontmatter': extract_frontmatter(content)
             }
 
     return topics
 
 
+def extract_frontmatter(content: str) -> dict:
+    """Извлечение frontmatter из Markdown"""
+    frontmatter_match = re.match(r'^---\n(.+?)\n---\n', content, re.DOTALL)
+    if frontmatter_match:
+        try:
+            frontmatter = yaml.safe_load(frontmatter_match.group(1))
+            return frontmatter if frontmatter else {}
+        except yaml.YAMLError:
+            return {}
+    return {}
+
+
 def extract_category_from_content(content: str) -> str:
-    """Извлечение категории из контента (по заголовку или тегам)"""
+    """Извлечение категории из контента"""
+    # Пробуем извлечь из frontmatter
+    frontmatter = extract_frontmatter(content)
+    if 'category' in frontmatter:
+        return frontmatter['category']
+
+    # Пробуем из заголовка
     match = re.search(r'^#\s*(.+?)$', content, re.MULTILINE)
     if match:
         return match.group(1).lower().replace(' ', '_')
+
     return 'general'
 
 
-def parse_cards_from_topic(topic_name: str, topic_data: Dict, card_id: int) -> List[InterviewCard]:
-    """Парсинг карточек из темы (AI-сгенерированные вопросы)"""
-    cards = []
-    content = topic_data['content']
-    category = topic_data.get('category', 'general')
+def extract_difficulty(content: str) -> str:
+    """Извлечение уровня сложности"""
+    frontmatter = extract_frontmatter(content)
+    if 'difficulty' in frontmatter:
+        return frontmatter['difficulty']
 
-    # Паттерн для поиска вопросов в формате AI-генерации
-    questions = re.findall(
+    if 'difficulty: hard' in content.lower() or '#hard' in content.lower():
+        return 'hard'
+    elif 'difficulty: easy' in content.lower() or '#easy' in content.lower():
+        return 'easy'
+    return 'medium'
+
+
+def parse_cards_from_markdown(file_path: str, card_id: int = 1) -> List[InterviewCard]:
+    """Парсинг карточек Spaced Repetition из Markdown файла"""
+    cards = []
+
+    # 🔴 ДОБАВЬТЕ ТОЛЬКО ЭТИ СТРОКИ:
+    print(f"\n🔍 Парсинг: {file_path}")
+    print(f"📁 Файл существует: {os.path.exists(file_path)}")
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    print(f"📊 Длина: {len(content)} символов")
+    print(f"📊 'Вопрос:' в контенте: {'Вопрос:' in content}")
+    # 🔴 КОНЕЦ ОТЛАДКИ
+
+    topic_name = os.path.basename(file_path).replace('.md', '')
+    category = extract_category_from_content(content)
+    frontmatter = extract_frontmatter(content)
+
+    # Паттерн 1: ### Вопрос: ... Ответ: ...
+    questions_v1 = re.findall(
         r'### Вопрос:\s*(.+?)\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
         content, re.DOTALL
     )
 
-    for q_text, a_text in questions:
-        code_snippets = re.findall(r'```(?:python|javascript|java|sql)?\n(.+?)\n```', a_text, re.DOTALL)
+    # Паттерн 2: #card формат (Obsidian_to_Anki)
+    questions_v2 = re.findall(
+        r'#card\n\n(.+?)\n:::\n(.+?)(?=#card|$)',
+        content, re.DOTALL
+    )
+
+    # Паттерн 3: Заголовок как вопрос, контент после --- как ответ
+    questions_v3 = re.findall(
+        r'^#\s*(.+?)\n\n---\n\n(.+?)(?=^#\s|#card|$)',
+        content, re.MULTILINE | re.DOTALL
+    )
+
+    all_questions = questions_v1 + questions_v2 + questions_v3
+
+    for q_text, a_text in all_questions:
+        code_snippets = re.findall(
+            r'```(?:python|javascript|java|sql|json|bash)?\n(.+?)\n```',
+            a_text, re.DOTALL
+        )
+
+        tags = frontmatter.get('tags', []) if isinstance(frontmatter.get('tags'), list) else []
+        if isinstance(tags, str):
+            tags = [tags]
 
         card = InterviewCard(
             id=card_id,
@@ -107,15 +135,16 @@ def parse_cards_from_topic(topic_name: str, topic_data: Dict, card_id: int) -> L
             answer=a_text.strip(),
             code_snippets=code_snippets,
             difficulty=extract_difficulty(content),
-            tags=[category],
-            source_note=topic_name
+            tags=tags,
+            source_note=topic_name,
+            frontmatter=frontmatter
         )
 
         if card.validate():
             cards.append(card)
             card_id += 1
 
-    # Если не найдено вопросов в специальном формате, создаём одну карточку из всего контента
+    # Если не найдено вопросов, создаём одну карточку из всего контента
     if not cards:
         card = InterviewCard(
             id=card_id,
@@ -123,10 +152,14 @@ def parse_cards_from_topic(topic_name: str, topic_data: Dict, card_id: int) -> L
             category=category,
             question=f"Расскажите о: {topic_name}",
             answer=content,
-            code_snippets=re.findall(r'```(?:python|javascript|java|sql)?\n(.+?)\n```', content, re.DOTALL),
+            code_snippets=re.findall(
+                r'```(?:python|javascript|java|sql|json|bash)?\n(.+?)\n```',
+                content, re.DOTALL
+            ),
             difficulty='medium',
             tags=[category],
-            source_note=topic_name
+            source_note=topic_name,
+            frontmatter=frontmatter
         )
         if card.validate():
             cards.append(card)
@@ -134,33 +167,22 @@ def parse_cards_from_topic(topic_name: str, topic_data: Dict, card_id: int) -> L
     return cards
 
 
-def extract_difficulty(content: str) -> str:
-    """Извлечение уровня сложности из контента"""
-    if 'difficulty: hard' in content.lower() or '#hard' in content.lower():
-        return 'hard'
-    elif 'difficulty: easy' in content.lower() or '#easy' in content.lower():
-        return 'easy'
-    return 'medium'
+def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
+    """Парсинг всех Markdown файлов в директории"""
+    all_cards = []
+    card_id = 1
 
+    if not os.path.exists(input_dir):
+        return all_cards
 
-def parse_questions_to_objects(questions_data: List[Dict]) -> List[InterviewCard]:
-    """Конвертация данных в объекты InterviewCard"""
-    cards = []
-    for idx, data in enumerate(questions_data, 1):
-        card = InterviewCard(
-            id=data.get('id', idx),
-            topic=data.get('topic', data.get('category', 'general')),
-            category=data.get('category', 'general'),
-            question=data.get('question', data.get('q', '')),
-            answer=data.get('answer', data.get('a', '')),
-            code_snippets=data.get('code_snippets', []),
-            difficulty=data.get('difficulty', 'medium'),
-            tags=data.get('tags', []),
-            source_note=data.get('source_note')
-        )
-        if card.validate():
-            cards.append(card)
-    return cards
+    for file in os.listdir(input_dir):
+        if file.endswith('.md'):
+            file_path = os.path.join(input_dir, file)
+            cards = parse_cards_from_markdown(file_path, card_id)
+            all_cards.extend(cards)
+            card_id += len(cards)
+
+    return all_cards
 
 
 # =============================================================================
@@ -225,56 +247,45 @@ def remove_obsidian_links(text: str) -> str:
     return text
 
 
+def remove_spaced_repetition_tags(text: str) -> str:
+    """Удаление тегов Spaced Repetition для Anki"""
+    text = re.sub(r'#card\s*', '', text)
+    text = re.sub(r'#interview\s*', '', text)
+    text = re.sub(r'#\w+\s*', '', text)
+    return text.strip()
+
+
 # =============================================================================
 # Генерация карточек для Obsidian
 # =============================================================================
 
 def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
     """Генерация карточки для Obsidian Spaced Repetition"""
-    frontmatter = f"""---
-tags: [{', '.join([f'interview/{tag}' for tag in card.tags])}]
-created: {card.created_at.strftime('%Y-%m-%d')}
-updated: {card.updated_at.strftime('%Y-%m-%d')}
-source: "[[{card.source_note}]]"
-difficulty: {card.difficulty}
-category: {card.category}
----
+    # 🔴 Создаём директорию если не существует
+    os.makedirs(output_dir, exist_ok=True)
 
-# {card.question}
-
----
-
-{card.answer}
-
-"""
-
-    if card.code_snippets:
-        frontmatter += "## Примеры кода\n\n"
-        for snippet in card.code_snippets:
-            frontmatter += f"```python\n{snippet}\n```\n\n"
-
-    if card.source_note:
-        frontmatter += f"[[{card.source_note}|📎 Полный материал]]\n\n"
-
-    frontmatter += "#card #interview\n"
+    markdown_content = card.to_markdown()
 
     file_path = os.path.join(output_dir, f"{card.topic}.md")
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(frontmatter)
+        f.write(markdown_content)
 
+    print(f"📝 Создан файл: {file_path}")
     return file_path
 
 
 def generate_obsidian_merged_file(cards: List[InterviewCard], category: str, output_dir: str) -> str:
     """Генерация объединённого файла для категории (Obsidian_to_Anki формат)"""
+    # 🔴 Создаём директорию если не существует
+    os.makedirs(output_dir, exist_ok=True)
+
     content = ""
 
     for card in cards:
         answer = card.answer
-        # Убираем ссылки для Anki
         answer = remove_obsidian_links(answer)
+        answer = remove_spaced_repetition_tags(answer)
 
         content += f"#card\n\n{card.question}\n:::\n{answer}\n\n"
 
@@ -285,11 +296,11 @@ def generate_obsidian_merged_file(cards: List[InterviewCard], category: str, out
         content += "---\n\n"
 
     file_path = os.path.join(output_dir, f"{category}.md")
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
+    print(f"📝 Создан файл: {file_path}")
     return file_path
 
 
@@ -298,12 +309,13 @@ def generate_obsidian_merged_file(cards: List[InterviewCard], category: str, out
 # =============================================================================
 
 def generate_anki_import_file(
-    cards: List[InterviewCard],
-    category: str,
-    output_path: str,
-    deck_prefix: str = "Interview"
+        cards: List[InterviewCard],
+        category: str,
+        output_path: str,
+        deck_prefix: str = "Interview"
 ) -> str:
     """Генерация файла для импорта в Anki"""
+    # 🔴 Создаём директорию если не существует
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
@@ -315,8 +327,8 @@ def generate_anki_import_file(
         front = format_markdown_to_html(card.question)
         back = format_markdown_to_html(card.answer)
 
-        # Убираем ссылки Obsidian
         back = remove_obsidian_links(back)
+        back = remove_spaced_repetition_tags(back)
 
         if card.code_snippets:
             for snippet in card.code_snippets:
@@ -330,6 +342,7 @@ def generate_anki_import_file(
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(header + cards_content)
 
+    print(f"📝 Создан файл: {output_path}")
     return output_path
 
 
@@ -374,6 +387,7 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
 
 def natural_sort(file_paths: List[str]) -> List[str]:
     """Естественная сортировка файлов"""
+
     def atoi(text):
         return int(text) if text.isdigit() else text
 
@@ -383,49 +397,40 @@ def natural_sort(file_paths: List[str]) -> List[str]:
     return sorted(file_paths, key=natural_keys)
 
 
-def get_file_paths(folder_paths: List[str]) -> List[str]:
-    """Получение списка файлов"""
+def get_markdown_files(folder_paths: List[str]) -> List[str]:
+    """Получение списка Markdown файлов"""
     file_paths = []
     for folder_path in folder_paths:
         if os.path.exists(folder_path):
-            files = glob.glob(os.path.join(folder_path, '*.txt'))
+            files = glob.glob(os.path.join(folder_path, '*.md'))
             file_paths.extend(files)
     return natural_sort(file_paths)
 
 
-def validate_json_structure(data: Dict) -> bool:
-    """Валидация структуры JSON"""
-    required_fields = ['question', 'answer']
+def validate_markdown_structure(content: str) -> bool:
+    """Валидация структуры Markdown"""
+    # Проверяем наличие хотя бы одного вопроса или карточки
+    has_question = bool(re.search(r'### Вопрос:', content))
+    has_card = bool(re.search(r'#card', content))
+    has_header = bool(re.search(r'^#\s+', content, re.MULTILINE))
 
-    if isinstance(data, list):
-        for item in data:
-            if not all(field in item for field in required_fields):
-                return False
-        return True
-    elif isinstance(data, dict):
-        for category, questions in data.items():
-            if not isinstance(questions, list):
-                return False
-            for item in questions:
-                if not all(field in item for field in required_fields):
-                    return False
-        return True
-    return False
+    return has_question or has_card or has_header
 
 
-async def validate_json_file_async(file_path: str) -> Dict:
-    """Асинхронная валидация JSON файла"""
+async def validate_markdown_file_async(file_path: str) -> Dict:
+    """Асинхронная валидация Markdown файла"""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            content = f.read()
 
-        is_valid = validate_json_structure(data)
+        is_valid = validate_markdown_structure(content)
+        cards_count = len(re.findall(r'#card', content))
 
         return {
             'valid': is_valid,
             'path': file_path,
-            'categories': list(data.keys()) if isinstance(data, dict) else ['default'],
-            'total_questions': sum(len(v) for v in data.values()) if isinstance(data, dict) else len(data)
+            'cards_count': cards_count if cards_count > 0 else 1,
+            'category': extract_category_from_content(content)
         }
     except Exception as e:
         return {
@@ -435,13 +440,13 @@ async def validate_json_file_async(file_path: str) -> Dict:
         }
 
 
-def process_questions_batch(
-    cards: List[InterviewCard],
-    category: str,
-    output_dir: str,
-    batch_size: int = 500
+def process_cards_batch(
+        cards: List[InterviewCard],
+        category: str,
+        output_dir: str,
+        batch_size: int = 500
 ) -> List[str]:
-    """Обработка вопросов батчами для больших наборов данных"""
+    """Обработка карточек батчами для больших наборов данных"""
     output_files = []
 
     for i in range(0, len(cards), batch_size):
@@ -459,25 +464,46 @@ def process_questions_batch(
 
 
 def generate_all_formats(
-    cards: List[InterviewCard],
-    category: str,
-    obsidian_output: str,
-    anki_output: str
-) -> Dict[str, str]:
+        cards: List[InterviewCard],
+        category: str,
+        cards_output: str,  # 🔴 Путь к Cards в Vault
+        anki_output: str,
+        materials_path: str = None  # 🔴 Путь к Materials для ссылок
+) -> List[str]:
     """Генерация всех форматов вывода"""
-    output_files = {}
+    output_files: List[str] = []
 
-    # Obsidian Spaced Repetition (со ссылками)
+    print(f"\n🔵 Генерация для категории: {category}")
+    print(f"📂 Cards путь: {cards_output}")
+    print(f"📂 Materials путь: {materials_path}")
+    print(f"📂 Anki путь: {anki_output}")
+
+    # Создаём директории
+    os.makedirs(cards_output, exist_ok=True)
+    os.makedirs(os.path.join(cards_output, 'anki_sync'), exist_ok=True)
+    os.makedirs(anki_output, exist_ok=True)
+
+    # Obsidian карточки (в Vault/Cards)
     for card in cards:
-        generate_obsidian_card(card, obsidian_output)
-    output_files['obsidian'] = obsidian_output
+        card.source_note = f"Interview/Materials/{category}/{card.topic}" if materials_path else card.topic  # ✅ Правильная ссылка
+        file_path = generate_obsidian_card(card, cards_output)
+        output_files.append(file_path)
 
     # Obsidian_to_Anki (промежуточный)
-    merged_file = generate_obsidian_merged_file(cards, category, os.path.join(obsidian_output, 'anki_sync'))
-    output_files['obsidian_to_anki'] = merged_file
+    merged_file = generate_obsidian_merged_file(
+        cards,
+        category,
+        os.path.join(cards_output, 'anki_sync')
+    )
+    output_files.append(merged_file)
 
     # Anki Import (без ссылок)
-    anki_file = generate_anki_import_file(cards, category, os.path.join(anki_output, f"{category}.txt"))
-    output_files['anki'] = anki_file
+    anki_file = generate_anki_import_file(
+        cards,
+        category,
+        os.path.join(anki_output, f"{category}.txt")
+    )
+    output_files.append(anki_file)
 
+    print(f"✅ Сгенерировано файлов: {len(output_files)}")
     return output_files

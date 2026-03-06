@@ -1,12 +1,10 @@
 import os
 import sys
-import json
+
 from config.Config import Config
 from logic.utils import (
-    load_categories_questions,
     load_markdown_topics,
-    parse_cards_from_topic,
-    parse_questions_to_objects,
+    parse_cards_from_markdown,
     generate_all_formats,
     clean_up_duplicates
 )
@@ -19,41 +17,35 @@ def main():
     obsidian_vault = Config.OBSIDIAN_VAULT.value
 
     print("=" * 60)
-    print("📚 Interview Cards - Генератор карточек")
+    print("📚 Interview Cards - Генератор карточек (Markdown Only)")
     print("=" * 60)
 
-    # Выбор типа входных данных
-    input_type = input("Тип входных данных (1=JSON, 2=Markdown): ").strip()
-    if input_type == "2":
-        input_dir = input(f"Путь к папке с темами (по умолчанию: {os.path.join(documents, 'input/interview_topics')}): ")
-        if not input_dir:
-            input_dir = os.path.join(documents, "input/interview_topics")
-        json_file = None
-    else:
-        json_file = input(f"Путь к JSON файлу (по умолчанию: {os.path.join(documents, 'interview_questions.json')}): ")
-        if not json_file:
-            json_file = os.path.join(documents, "interview_questions.json")
-        input_dir = None
+    input_dir = input(
+        f"Путь к папке с Markdown темами (по умолчанию: {os.path.join(documents, 'input/interview_topics')}): ")
+    if not input_dir:
+        input_dir = os.path.join(documents, "input/interview_topics")
 
-    # Проверка существования
-    if json_file and not os.path.exists(json_file):
-        print(f"❌ Файл не найден: {json_file}")
-        sys.exit(1)
-    if input_dir and not os.path.exists(input_dir):
+    if not os.path.exists(input_dir):
         print(f"❌ Папка не найдена: {input_dir}")
-        sys.exit(1)
+        create = input("Создать папку с примером? y/n: ").lower()
+        if create == 'y':
+            os.makedirs(input_dir, exist_ok=True)
+            example_path = os.path.join(input_dir, "example_topic.md")
+            example_content = """# Python GIL
 
-    if json_file:
-        print(f"✅ Файл найден: {json_file}")
-        with open(json_file, 'r', encoding='utf-8') as f:
-            preview_data = json.load(f)
-
-        if isinstance(preview_data, dict):
-            print(f"📁 Категорий: {len(preview_data)}")
-            total_q = sum(len(v) for v in preview_data.values())
-            print(f"📝 Всего вопросов: {total_q}")
-        elif isinstance(preview_data, list):
-            print(f"📝 Всего вопросов: {len(preview_data)}")
+            ## Теория
+            **GIL (Global Interpreter Lock)** — это механизм в CPython...
+            
+            ### Вопрос: Что такое GIL в Python?
+            Ответ: **GIL** — это механизм в CPython...
+            
+            #card #interview #python
+            """
+            with open(example_path, 'w', encoding='utf-8') as f:
+                f.write(example_content)
+            print(f"✅ Пример создан: {example_path}")
+        else:
+            sys.exit(1)
     else:
         print(f"✅ Папка найдена: {input_dir}")
         topics = load_markdown_topics(input_dir)
@@ -82,52 +74,29 @@ def main():
 
     output_files = []
     total_generated = 0
+    card_id = 1
 
-    if json_file:
-        categories_data = load_categories_questions(json_file)
+    topics = load_markdown_topics(input_dir)
 
-        for category in selected_categories:
-            if category not in categories_data:
-                print(f"⚠️ Категория '{category}' не найдена в файле")
-                continue
+    for topic_name, topic_data in topics.items():
+        topic_category = topic_data.get('category', 'general')
+        if selected_categories and topic_category not in selected_categories:
+            continue
 
-            questions_data = categories_data[category]
-            cards = parse_questions_to_objects(questions_data)
+        cards = parse_cards_from_markdown(topic_data['path'], card_id)
+        card_id += len(cards)
 
-            if not cards:
-                print(f"⚠️ Нет валидных вопросов в категории '{category}'")
-                continue
+        if not cards:
+            print(f"⚠️ Нет валидных карточек в теме '{topic_name}'")
+            continue
 
-            obsidian_path = os.path.join(obsidian_vault, "Interview", category)
-            anki_path = os.path.join(output_dir, "anki")
+        obsidian_path = os.path.join(obsidian_vault, "Interview", topic_category)
+        anki_path = os.path.join(output_dir, "anki")
 
-            files = generate_all_formats(cards, category, obsidian_path, anki_path)
-            output_files.extend(files.values())
-            total_generated += len(cards)
-            print(f"✅ Категория '{category}': {len(cards)} карточек")
-    else:
-        topics = load_markdown_topics(input_dir)
-        card_id = 1
-
-        for topic_name, topic_data in topics.items():
-            topic_category = topic_data.get('category', 'general')
-            if topic_category not in selected_categories:
-                continue
-
-            cards = parse_cards_from_topic(topic_name, topic_data, card_id)
-            card_id += len(cards)
-
-            if not cards:
-                print(f"⚠️ Нет валидных карточек в теме '{topic_name}'")
-                continue
-
-            obsidian_path = os.path.join(obsidian_vault, "Interview", topic_category)
-            anki_path = os.path.join(output_dir, "anki")
-
-            files = generate_all_formats(cards, topic_category, obsidian_path, anki_path)
-            output_files.extend(files.values())
-            total_generated += len(cards)
-            print(f"✅ Тема '{topic_name}': {len(cards)} карточек")
+        files = generate_all_formats(cards, topic_category, obsidian_path, anki_path)
+        output_files.extend(files)
+        total_generated += len(cards)
+        print(f"✅ Тема '{topic_name}': {len(cards)} карточек")
 
     if is_clean_duplicates and output_files:
         txt_files = [f for f in output_files if f.endswith('.txt')]

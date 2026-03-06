@@ -1,27 +1,19 @@
 from logic.utils import (
-    load_json_questions,
-    load_categories_questions,
     load_markdown_topics,
-    parse_cards_from_topic,
-    parse_questions_to_objects,
+    parse_cards_from_markdown,
     generate_obsidian_card,
     generate_obsidian_merged_file,
     generate_anki_import_file,
     generate_all_formats,
-    clean_up_duplicates,
-    validate_json_structure
+    clean_up_duplicates
 )
 
 __all__ = [
-    'load_json_questions',
-    'load_categories_questions',
     'load_markdown_topics',
-    'parse_cards_from_topic',
-    'parse_questions_to_objects',
+    'parse_cards_from_markdown',
     'generate_obsidian_card',
     'generate_obsidian_merged_file',
     'generate_anki_import_file',
     'generate_all_formats',
-    'clean_up_duplicates',
-    'validate_json_structure'
+    'clean_up_duplicates'
 ]

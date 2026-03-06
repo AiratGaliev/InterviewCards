@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from typing import Optional, List
 from datetime import datetime
+from typing import Optional, List
 
 
 @dataclass
 class InterviewCard:
-    """Модель карточки для подготовки к интервью"""
+    """Модель карточки для подготовки к интервью (Spaced Repetition)"""
     id: int
     topic: str
     category: str
@@ -15,6 +15,7 @@ class InterviewCard:
     difficulty: str = "medium"  # easy, medium, hard
     tags: List[str] = field(default_factory=list)
     source_note: Optional[str] = None
+    frontmatter: Optional[dict] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
@@ -31,6 +32,34 @@ class InterviewCard:
     def has_code(self) -> bool:
         """Проверка наличия кода"""
         return len(self.code_snippets) > 0
+
+    def to_markdown(self) -> str:
+        """Конвертация в Markdown формат для Obsidian"""
+        tags_str = ', '.join([f'interview/{tag}' for tag in self.tags])
+
+        frontmatter = f"""---
+        tags: [{tags_str}]
+        created: {self.created_at.strftime('%Y-%m-%d')}
+        updated: {self.updated_at.strftime('%Y-%m-%d')}
+        source: "[[{self.source_note}]]"
+        difficulty: {self.difficulty}
+        category: {self.category}
+        ---
+        
+        """
+        content = f"# {self.question}\n\n---\n\n{self.answer}\n\n"
+
+        if self.code_snippets:
+            content += "## Примеры кода\n\n"
+            for snippet in self.code_snippets:
+                content += f"```python\n{snippet}\n```\n\n"
+
+        if self.source_note:
+            content += f"[[{self.source_note}|📎 Полный материал]]\n\n"
+
+        content += "#card #interview\n"
+
+        return frontmatter + content
 
     def to_dict(self) -> dict:
         """Конвертация в словарь"""
@@ -61,6 +90,7 @@ class InterviewCard:
             difficulty=data.get('difficulty', 'medium'),
             tags=data.get('tags', []),
             source_note=data.get('source_note'),
+            frontmatter=data.get('frontmatter', {}),
             created_at=datetime.fromisoformat(data['created_at']) if 'created_at' in data else datetime.now(),
             updated_at=datetime.fromisoformat(data['updated_at']) if 'updated_at' in data else datetime.now()
         )

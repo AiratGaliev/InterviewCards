@@ -1,32 +1,43 @@
 import os
+import shutil
+
 import streamlit as st
+
 from config.Config import Config
 from logic.utils import (
-    load_json_questions,
-    load_categories_questions,
     load_markdown_topics,
-    parse_cards_from_topic,
-    parse_questions_to_objects,
+    parse_cards_from_markdown,
     generate_all_formats,
-    clean_up_duplicates,
-    validate_json_structure,
-    process_questions_batch
+    clean_up_duplicates
 )
+
+# 🔴 Создаём директории при запуске
+Config.create_directories()
 
 categories_list: list[str] = Config.CATEGORIES_LIST.value
 documents = Config.DOCUMENTS.value
 output_dir = Config.OUTPUT.value
 obsidian_vault = Config.OBSIDIAN_VAULT.value
-max_questions = Config.MAX_QUESTIONS_PER_DECK.value
+card_tag = Config.CARD_TAG.value
 
 if __name__ == '__main__':
     if 'clicked' not in st.session_state:
         st.session_state.clicked = False
     if 'generated_files' not in st.session_state:
         st.session_state.generated_files = []
+    if 'generation_complete' not in st.session_state:
+        st.session_state.generation_complete = False
+
 
     def click_button():
         st.session_state.clicked = True
+
+
+    def reset_button():
+        st.session_state.clicked = False
+        st.session_state.generation_complete = False
+        st.session_state.generated_files = []
+
 
     st.set_page_config(
         page_title="Interview Cards - Генератор карточек",
@@ -35,33 +46,58 @@ if __name__ == '__main__':
     )
 
     st.title("📚 Interview Cards")
-    st.subheader("Генератор карточек для подготовки к собеседованиям")
+    st.subheader("Генератор карточек Spaced Repetition из Markdown")
+
+    # 🔴 Информация о путях
+    with st.expander("📍 Информация о путях", expanded=False):
+        st.code(f"""
+        Документы: {documents}
+        Вывод: {output_dir}
+        Obsidian Vault: {obsidian_vault}
+        Папка с темами: {os.path.join(documents, 'input/interview_topics')}
+        """)
 
     # Боковая панель
     with st.sidebar:
         st.header("⚙️ Настройки")
 
-        input_type = st.radio(
-            "Тип входных данных",
-            ["JSON файлы", "Markdown темы (AI)"],
-            index=0
+        input_dir = st.text_input(
+            "Путь к папке с Markdown темами",
+            value=os.path.join(documents, "input/interview_topics")
         )
 
-        if input_type == "JSON файлы":
-            json_file = st.text_input(
-                "Путь к JSON файлу",
-                value=os.path.join(documents, "interview_questions.json")
-            )
-        else:
-            input_dir = st.text_input(
-                "Путь к папке с темами",
-                value=os.path.join(documents, "input/interview_topics")
-            )
+        # 🔴 Проверка существования папки
+        if os.path.exists(input_dir):
+            st.success(f"✅ Папка найдена: {input_dir}")
+            topics = load_markdown_topics(input_dir)
+            st.info(f"📁 Тем найдено: {len(topics)}")
+
+        if st.button("📝 Создать папку и пример"):
+            try:
+                os.makedirs(input_dir, exist_ok=True)
+                example_path = os.path.join(input_dir, "example_topic.md")
+
+                # 🔴 Читаем из шаблона, не хардкодим!
+                template_path = os.path.join(os.path.dirname(__file__), "templates", "example_topic.md")
+                if os.path.exists(template_path):
+                    with open(template_path, 'r', encoding='utf-8') as f:
+                        example_content = f.read()
+                else:
+                    st.error(f"❌ Шаблон не найден: {template_path}")
+                    st.stop()
+
+                with open(example_path, 'w', encoding='utf-8') as f:
+                    f.write(example_content)
+                st.success(f"✅ Пример создан: {example_path}")
+                st.info(f"📁 Файл: {example_path}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Ошибка: {e}")
 
         selected_categories = st.multiselect(
             "Выберите категории",
             categories_list,
-            default=categories_list[:3]
+            default=categories_list[:3] if categories_list else []
         )
 
         output_format = st.multiselect(
@@ -71,54 +107,36 @@ if __name__ == '__main__':
         )
 
         is_clean_duplicates = st.checkbox("Удалить дубликаты", value=False)
-        batch_processing = st.checkbox("Разбить на батчи", value=False)
-        batch_size = st.number_input("Размер батча", min_value=100, max_value=1000, value=500) if batch_processing else 500
+
+        st.markdown("---")
+        st.info(f"Тег карточки: `{card_tag}`")
+
+        if st.session_state.clicked:
+            st.button("🔄 Сбросить", on_click=reset_button, use_container_width=True)
 
     # Основная область
     col1, col2 = st.columns([3, 1])
 
     with col1:
-        st.markdown("### 📋 Предпросмотр данных")
+        st.markdown("### 📋 Предпросмотр Markdown файлов")
 
-        if input_type == "JSON файлы" and os.path.exists(json_file):
-            try:
-                import json
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    preview_data = json.load(f)
+        if os.path.exists(input_dir):
+            topics = load_markdown_topics(input_dir)
 
-                if isinstance(preview_data, dict):
-                    st.metric("Категорий", len(preview_data))
-                    total_q = sum(len(v) for v in preview_data.values())
-                    st.metric("Всего вопросов", total_q)
+            if topics:
+                topic_names = list(topics.keys())
+                selected_topic = st.selectbox("Выберите тему для предпросмотра", topic_names)
 
-                    category_stats = {k: len(v) for k, v in preview_data.items()}
-                    st.bar_chart(category_stats)
-                elif isinstance(preview_data, list):
-                    st.metric("Всего вопросов", len(preview_data))
+                if selected_topic:
+                    with st.expander(f"📄 {selected_topic}", expanded=True):
+                        st.markdown(topics[selected_topic]['content'][:1000] + "...")
 
-                with st.expander("Пример вопроса"):
-                    if isinstance(preview_data, dict):
-                        first_cat = list(preview_data.keys())[0]
-                        if preview_data[first_cat]:
-                            st.json(preview_data[first_cat][0])
-                    elif isinstance(preview_data, list) and preview_data:
-                        st.json(preview_data[0])
-
-            except Exception as e:
-                st.error(f"Ошибка загрузки файла: {e}")
-        elif input_type == "Markdown темы (AI)" and os.path.exists(input_dir):
-            try:
-                topics = load_markdown_topics(input_dir)
-                st.metric("Тем найдено", len(topics))
-
-                if topics:
-                    first_topic = list(topics.keys())[0]
-                    with st.expander(f"Пример: {first_topic}"):
-                        st.markdown(topics[first_topic]['content'][:500] + "...")
-            except Exception as e:
-                st.error(f"Ошибка загрузки тем: {e}")
-        else:
-            st.warning("Файл или папка не найдены. Укажите корректный путь.")
+                    topic_data = topics[selected_topic]
+                    cards_count = len(topic_data['content'].split('#card')) - 1 if '#card' in topic_data[
+                        'content'] else 1
+                    st.metric(f"Карточек в теме", max(cards_count, 1))
+            else:
+                st.warning("⚠️ Нет Markdown файлов в папке")
 
     with col2:
         st.markdown("### 🚀 Генерация")
@@ -131,71 +149,56 @@ if __name__ == '__main__':
             use_container_width=True
         )
 
-    # Результаты
-    if start_btn:
-        input_exists = (input_type == "JSON файлы" and os.path.exists(json_file)) or \
-                       (input_type == "Markdown темы (AI)" and os.path.exists(input_dir))
+        if st.session_state.clicked:
+            st.info("⏳ Обработка... Пожалуйста, подождите")
 
-        if not input_exists:
-            st.error("Файл или папка не найдены!")
+    # 🔴 Результаты генерации
+    if st.session_state.clicked and not st.session_state.generation_complete:
+        if not os.path.exists(input_dir):
+            st.error("❌ Папка с Markdown файлами не найдена!")
             st.session_state.clicked = False
         else:
-            with st.status("🚧 Обработка данных... Пожалуйста, подождите.", expanded=True) as status:
+            with st.status("🚧 Обработка Markdown файлов... Пожалуйста, подождите.", expanded=True) as status:
                 try:
                     output_files = []
                     total_generated = 0
                     all_cards = []
 
-                    if input_type == "JSON файлы":
-                        categories_data = load_categories_questions(json_file)
+                    topics = load_markdown_topics(input_dir)
+                    card_id = 1
 
-                        for category in selected_categories:
-                            if category not in categories_data:
-                                st.warning(f"Категория '{category}' не найдена в файле")
-                                continue
+                    for topic_name, topic_data in topics.items():
+                        topic_category = topic_data.get('category', 'general')
 
-                            questions_data = categories_data[category]
-                            cards = parse_questions_to_objects(questions_data)
+                        if selected_categories and topic_category not in selected_categories:
+                            st.warning(f"⚠️ Категория '{topic_category}' не выбрана")
+                            continue
 
-                            if not cards:
-                                st.warning(f"Нет валидных вопросов в категории '{category}'")
-                                continue
+                        cards = parse_cards_from_markdown(topic_data['path'], card_id)
+                        card_id += len(cards)
 
-                            all_cards.extend(cards)
+                        if not cards:
+                            st.warning(f"⚠️ Нет валидных карточек в теме '{topic_name}'")
+                            continue
 
-                            obsidian_path = os.path.join(obsidian_vault, "Interview", category)
-                            anki_path = os.path.join(output_dir, "anki")
+                        all_cards.extend(cards)
 
-                            files = generate_all_formats(cards, category, obsidian_path, anki_path)
-                            output_files.extend(files.values())
-                            total_generated += len(cards)
-                            st.success(f"✅ Категория '{category}': {len(cards)} карточек")
+                        materials_path = os.path.join(obsidian_vault, "Interview", "Materials",
+                                                      topic_category)  # ✅ Материалы
+                        cards_path = os.path.join(obsidian_vault, "Interview", "Cards", topic_category)  # ✅ Карточки
+                        anki_path = os.path.join(output_dir, "anki")  # ✅ Anki файлы
 
-                    else:
-                        topics = load_markdown_topics(input_dir)
-                        card_id = 1
+                        input_file = topic_data['path']
+                        material_file = os.path.join(materials_path, f"{topic_name}.md")
+                        os.makedirs(materials_path, exist_ok=True)
+                        shutil.copy2(input_file, material_file)
 
-                        for topic_name, topic_data in topics.items():
-                            topic_category = topic_data.get('category', 'general')
-                            if topic_category not in selected_categories:
-                                continue
+                        # Генерируем карточки в Cards (с ссылками на Materials)
+                        files = generate_all_formats(cards, topic_category, cards_path, anki_path, materials_path)
 
-                            cards = parse_cards_from_topic(topic_name, topic_data, card_id)
-                            card_id += len(cards)
-
-                            if not cards:
-                                st.warning(f"Нет валидных карточек в теме '{topic_name}'")
-                                continue
-
-                            all_cards.extend(cards)
-
-                            obsidian_path = os.path.join(obsidian_vault, "Interview", topic_category)
-                            anki_path = os.path.join(output_dir, "anki")
-
-                            files = generate_all_formats(cards, topic_category, obsidian_path, anki_path)
-                            output_files.extend(files.values())
-                            total_generated += len(cards)
-                            st.success(f"✅ Тема '{topic_name}': {len(cards)} карточек")
+                        output_files.extend(files)
+                        total_generated += len(cards)
+                        st.success(f"✅ Тема '{topic_name}': {len(cards)} карточек")
 
                     if is_clean_duplicates and output_files:
                         txt_files = [f for f in output_files if f.endswith('.txt')]
@@ -211,20 +214,32 @@ if __name__ == '__main__':
 
                     st.session_state.generated_files = output_files
                     st.session_state.clicked = False
+                    st.session_state.generation_complete = True
+
+                    # 🔴 Показываем пути к файлам
+                    st.success(f"""
+                    ### 📂 Файлы сгенерированы!
+
+                    **Obsidian:** `{obsidian_vault}/Interview/`
+
+                    **Anki:** `{output_dir}/anki/`
+                    """)
+                    st.rerun()
 
                 except Exception as e:
                     status.update(label="❌ Ошибка генерации", state="error")
                     st.error(f"Произошла ошибка: {e}")
                     import traceback
+
                     st.code(traceback.format_exc())
                     st.session_state.clicked = False
 
-    # Скачивание файлов
+    # 🔴 Скачивание файлов
     if st.session_state.generated_files:
         st.markdown("### 📥 Скачивание файлов")
 
-        for file_path in st.session_state.generated_files:
-            if os.path.exists(file_path):
+        for idx, file_path in enumerate(st.session_state.generated_files):
+            if os.path.isfile(file_path):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
 
@@ -233,24 +248,15 @@ if __name__ == '__main__':
                     label=f"📄 {file_name}",
                     data=content,
                     file_name=file_name,
-                    mime="text/plain"
+                    mime="text/plain",
+                    key=f"download_{idx}_{file_name}"
                 )
+            else:
+                continue
 
-        # Инструкция по импорту
-        with st.expander("📖 Как импортировать"):
-            st.markdown("""
-            ### Obsidian
-            1. Поместите файлы в папку вашего Obsidian Vault
-            2. Установите плагин **Spaced Repetition** или **Obsidian_to_Anki**
-            3. Карточки с тегом `#card` будут автоматически обнаружены
-
-            ### Anki
-            1. Откройте Anki
-            2. Нажмите **Файл** → **Импорт**
-            3. Выберите скачанный файл (.txt)
-            4. Убедитесь, что разделитель - **Tab**
-            5. Нажмите **Импорт**
-            """)
+        if st.button("🔄 Новая генерация", on_click=reset_button):
+            st.session_state.generated_files = []
+            st.rerun()
 
     # Статистика
     with st.expander("📊 Статистика"):
@@ -259,11 +265,12 @@ if __name__ == '__main__':
             for file_path in st.session_state.generated_files:
                 if os.path.exists(file_path):
                     with open(file_path, 'r', encoding='utf-8') as f:
-                        lines = [l for l in f.readlines() if l.strip() and not l.startswith('#')]
+                        content = f.read()
                         if file_path.endswith('.txt'):
+                            lines = [l for l in content.split('\n') if l.strip() and not l.startswith('#')]
                             total_cards += len(lines)
                         else:
-                            total_cards += lines.count('#card')
+                            total_cards += content.count('#card')
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Файлов сгенерировано", len(st.session_state.generated_files))
