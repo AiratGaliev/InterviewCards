@@ -184,11 +184,17 @@ if __name__ == '__main__':
                         cards_path = os.path.join(obsidian_vault, "Interview", "Cards", topic_category)
                         anki_path = os.path.join(output_dir, "anki")
 
-
                         input_file = topic_data['path']
                         material_file = os.path.join(materials_path, f"{topic_name}.md")
                         os.makedirs(materials_path, exist_ok=True)
-                        shutil.copy2(input_file, material_file)
+
+                        if os.path.abspath(input_file) != os.path.abspath(material_file):
+                            try:
+                                shutil.copy2(input_file, material_file)
+                            except PermissionError as e:
+                                st.warning(f"⚠️ Не удалось скопировать {topic_name}: файл занят или нет прав.")
+                        else:
+                            pass
 
                         files = generate_all_formats(cards, topic_category, cards_path, anki_path, materials_path)
                         output_files.extend(files)
