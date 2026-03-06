@@ -14,26 +14,36 @@ from models.InterviewCard import InterviewCard
 # =============================================================================
 
 def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
-    """Загрузка материалов из Markdown файлов"""
+    """Рекурсивно загружает материалы из Markdown файлов, определяя категорию по имени папки."""
     topics = {}
 
     if not os.path.exists(input_dir):
         return topics
 
-    for file in os.listdir(input_dir):
-        if file.endswith('.md'):
-            topic_name = file.replace('.md', '')
-            file_path = os.path.join(input_dir, file)
+    # Рекурсивно обходим все подпапки
+    for root, dirs, files in os.walk(input_dir):
+        for file in files:
+            if file.endswith('.md'):
+                file_path = os.path.join(root, file)
+                topic_name = file.replace('.md', '')
 
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+                # Определяем категорию как имя последней папки в пути относительно input_dir
+                rel_path = os.path.relpath(root, input_dir)
+                if rel_path == '.':
+                    category = 'general'  # файл в корне
+                else:
+                    # Берём первую часть пути (если вложенность глубже, можно скорректировать)
+                    category = rel_path.split(os.sep)[0]
 
-            topics[topic_name] = {
-                'content': content,
-                'path': file_path,
-                'category': extract_category_from_content(content),
-                'frontmatter': extract_frontmatter(content)
-            }
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                topics[topic_name] = {
+                    'content': content,
+                    'path': file_path,
+                    'category': category,
+                    'frontmatter': extract_frontmatter(content)
+                }
 
     return topics
 

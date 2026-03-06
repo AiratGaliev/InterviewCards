@@ -11,13 +11,13 @@ from logic.utils import (
     clean_up_duplicates
 )
 
-# 🔴 Создаём директории при запуске
 Config.create_directories()
 
 categories_list: list[str] = Config.CATEGORIES_LIST.value
 documents = Config.DOCUMENTS.value
 output_dir = Config.OUTPUT.value
 obsidian_vault = Config.OBSIDIAN_VAULT.value
+materials_source = Config.MATERIALS_SOURCE.value  # 📂 новая переменная
 card_tag = Config.CARD_TAG.value
 
 if __name__ == '__main__':
@@ -48,13 +48,12 @@ if __name__ == '__main__':
     st.title("📚 Interview Cards")
     st.subheader("Генератор карточек Spaced Repetition из Markdown")
 
-    # 🔴 Информация о путях
     with st.expander("📍 Информация о путях", expanded=False):
         st.code(f"""
-        Документы: {documents}
-        Вывод: {output_dir}
         Obsidian Vault: {obsidian_vault}
-        Папка с темами: {os.path.join(documents, 'input/interview_topics')}
+        Материалы (исходники): {materials_source}
+        Карточки (генерация): {os.path.join(obsidian_vault, 'Interview', 'Cards')}
+        Anki вывод: {os.path.join(output_dir, 'anki')}
         """)
 
     # Боковая панель
@@ -63,21 +62,20 @@ if __name__ == '__main__':
 
         input_dir = st.text_input(
             "Путь к папке с Markdown темами",
-            value=os.path.join(documents, "input/interview_topics")
+            value=materials_source  # ← по умолчанию папка в Vault
         )
 
-        # 🔴 Проверка существования папки
         if os.path.exists(input_dir):
             st.success(f"✅ Папка найдена: {input_dir}")
             topics = load_markdown_topics(input_dir)
             st.info(f"📁 Тем найдено: {len(topics)}")
 
-        if st.button("📝 Создать папку и пример"):
+        # 🔧 Кнопка создания примера теперь кладёт файл прямо в materials_source
+        if st.button("📝 Создать пример в Materials"):
             try:
                 os.makedirs(input_dir, exist_ok=True)
                 example_path = os.path.join(input_dir, "example_topic.md")
 
-                # 🔴 Читаем из шаблона, не хардкодим!
                 template_path = os.path.join(os.path.dirname(__file__), "templates", "example_topic.md")
                 if os.path.exists(template_path):
                     with open(template_path, 'r', encoding='utf-8') as f:
@@ -89,7 +87,6 @@ if __name__ == '__main__':
                 with open(example_path, 'w', encoding='utf-8') as f:
                     f.write(example_content)
                 st.success(f"✅ Пример создан: {example_path}")
-                st.info(f"📁 Файл: {example_path}")
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Ошибка: {e}")
@@ -158,7 +155,7 @@ if __name__ == '__main__':
             st.error("❌ Папка с Markdown файлами не найдена!")
             st.session_state.clicked = False
         else:
-            with st.status("🚧 Обработка Markdown файлов... Пожалуйста, подождите.", expanded=True) as status:
+            with st.status("🚧 Обработка Markdown файлов...", expanded=True) as status:
                 try:
                     output_files = []
                     total_generated = 0
@@ -183,19 +180,17 @@ if __name__ == '__main__':
 
                         all_cards.extend(cards)
 
-                        materials_path = os.path.join(obsidian_vault, "Interview", "Materials",
-                                                      topic_category)  # ✅ Материалы
-                        cards_path = os.path.join(obsidian_vault, "Interview", "Cards", topic_category)  # ✅ Карточки
-                        anki_path = os.path.join(output_dir, "anki")  # ✅ Anki файлы
+                        materials_path = os.path.join(obsidian_vault, "Interview", "Materials", topic_category)
+                        cards_path = os.path.join(obsidian_vault, "Interview", "Cards", topic_category)
+                        anki_path = os.path.join(output_dir, "anki")
+
 
                         input_file = topic_data['path']
                         material_file = os.path.join(materials_path, f"{topic_name}.md")
                         os.makedirs(materials_path, exist_ok=True)
                         shutil.copy2(input_file, material_file)
 
-                        # Генерируем карточки в Cards (с ссылками на Materials)
                         files = generate_all_formats(cards, topic_category, cards_path, anki_path, materials_path)
-
                         output_files.extend(files)
                         total_generated += len(cards)
                         st.success(f"✅ Тема '{topic_name}': {len(cards)} карточек")
@@ -207,23 +202,17 @@ if __name__ == '__main__':
                             if removed > 0:
                                 st.info(f"🧹 Удалено дубликатов: {removed}")
 
-                    status.update(
-                        label=f"🏁 Готово! Сгенерировано {total_generated} карточек",
-                        state="complete"
-                    )
-
+                    status.update(label=f"🏁 Готово! Сгенерировано {total_generated} карточек", state="complete")
                     st.session_state.generated_files = output_files
                     st.session_state.clicked = False
                     st.session_state.generation_complete = True
 
-                    # 🔴 Показываем пути к файлам
                     st.success(f"""
-                    ### 📂 Файлы сгенерированы!
-
-                    **Obsidian:** `{obsidian_vault}/Interview/`
-
-                    **Anki:** `{output_dir}/anki/`
-                    """)
+                        ### 📂 Файлы сгенерированы!
+                        **Obsidian (карточки):** `{obsidian_vault}/Interview/Cards/`
+                        **Obsidian (материалы):** `{obsidian_vault}/Interview/Materials/`
+                        **Anki:** `{output_dir}/anki/`
+                        """)
                     st.rerun()
 
                 except Exception as e:

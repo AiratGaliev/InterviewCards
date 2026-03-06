@@ -1,3 +1,5 @@
+# config/Config.py
+
 import configparser
 import os
 import platform
@@ -34,6 +36,7 @@ class Config(Enum):
     OBSIDIAN_VAULT: str = os.path.expanduser('~') + _config[get_path_by_platform()]['obsidian_vault']
     ANKI_COLLECTION_MEDIA: str = os.path.expanduser('~') + _config[get_path_by_platform()]['anki_collection_media']
 
+    MATERIALS_SOURCE: str = os.path.join(OBSIDIAN_VAULT, "Interview", "Materials")
     MAX_QUESTIONS_PER_DECK: int = int(_config['limits']['max_questions_per_deck'])
     MAX_QUESTION_LENGTH: int = int(_config['limits']['max_question_length'])
     MAX_ANSWER_LENGTH: int = int(_config['limits']['max_answer_length'])
@@ -51,8 +54,7 @@ class Config(Enum):
             os.path.join(Config.OUTPUT.value, 'anki'),
             Config.OBSIDIAN_VAULT.value,
             os.path.join(Config.OBSIDIAN_VAULT.value, 'Interview', 'Materials'),
-            os.path.join(Config.OBSIDIAN_VAULT.value, 'Interview', 'Cards'),
-            os.path.join(Config.DOCUMENTS.value, 'input', 'interview_topics'),
+            os.path.join(Config.OBSIDIAN_VAULT.value, 'Interview', 'Cards')
         ]
         for dir_path in dirs:
             os.makedirs(dir_path, exist_ok=True)
