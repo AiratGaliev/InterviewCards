@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from config.Config import AppConfig
@@ -83,46 +82,46 @@ class CardGenerator:
 
         # Контент по умолчанию
         default_content = """---
-tags: [interview/python]
-difficulty: medium
-category: python
----
-
-# GIL в Python
-
-## Теория
-
-**GIL (Global Interpreter Lock)** — это механизм в CPython, который позволяет только одному потоку выполнять байт-код.
-
-## Ключевые моменты
-
-- Многопоточность не ускоряет CPU-bound задачи
-- I/O-bound задачи всё ещё выигрывают от многопоточности
-- Для CPU-bound задач используйте multiprocessing
-
-### Вопрос: Что такое GIL в Python?
-
-Ответ: **GIL** — это механизм в CPython, который позволяет только одному потоку выполнять байт-код.
-
-**Последствия:**
-
-- Многопоточность не ускоряет CPU-bound задачи
-- I/O-bound задачи всё ещё выигрывают от многопоточности
-- Для CPU-bound задач используйте `multiprocessing`
-
-### Вопрос: Когда использовать multiprocessing?
-
-Ответ: Используйте **multiprocessing** для CPU-bound задач.
-
-```python
-from multiprocessing import Pool
-
-with Pool(4) as p:
-    results = p.map(lambda x: x * x, range(10))
-```
-
-#card #interview
-"""
+        tags: [interview/python]
+        difficulty: medium
+        category: python
+        ---
+        
+        # GIL в Python
+        
+        ## Теория
+        
+        **GIL (Global Interpreter Lock)** — это механизм в CPython, который позволяет только одному потоку выполнять байт-код.
+        
+        ## Ключевые моменты
+        
+        - Многопоточность не ускоряет CPU-bound задачи
+        - I/O-bound задачи всё ещё выигрывают от многопоточности
+        - Для CPU-bound задач используйте multiprocessing
+        
+        ### Вопрос: Что такое GIL в Python?
+        
+        Ответ: **GIL** — это механизм в CPython, который позволяет только одному потоку выполнять байт-код.
+        
+        **Последствия:**
+        
+        - Многопоточность не ускоряет CPU-bound задачи
+        - I/O-bound задачи всё ещё выигрывают от многопоточности
+        - Для CPU-bound задач используйте `multiprocessing`
+        
+        ### Вопрос: Когда использовать multiprocessing?
+        
+        Ответ: Используйте **multiprocessing** для CPU-bound задач.
+        
+        ```python
+        from multiprocessing import Pool
+        
+        with Pool(4) as p:
+            results = p.map(lambda x: x * x, range(10))
+        ```
+        
+        #card #interview
+        """
 
         # Пробуем загрузить шаблон
         content = default_content
@@ -139,10 +138,10 @@ with Pool(4) as p:
         return example_path
 
     def copy_material_to_vault(
-        self,
-        source_path: str,
-        topic_name: str,
-        category: str
+            self,
+            source_path: str,
+            topic_name: str,
+            category: str
     ) -> Optional[str]:
         """
         Копирует файл материала в Obsidian Vault.
@@ -156,18 +155,31 @@ with Pool(4) as p:
             Optional[str]: Путь к скопированному файлу или None
         """
         materials_path = self.config.get_materials_path(category)
-        os.makedirs(materials_path, exist_ok=True)
 
-        material_file = os.path.join(materials_path, f"{topic_name}.md")
+        target_path = os.path.join(materials_path, f"{topic_name}.md")
 
-        # Проверяем, не тот же ли это файл
-        if os.path.abspath(source_path) == os.path.abspath(material_file):
-            return material_file
+        # Нормализация путей для сравнения
+        source_abs = os.path.abspath(source_path)
+        target_abs = os.path.abspath(target_path)
+        vault_materials_root_abs = os.path.abspath(self.config.materials_source)
 
+        # 1. Если исходный файл уже находится в целевой папке категории
+        if source_abs == target_abs:
+            return target_path
+
+        # 2. Если исходный файл уже находится внутри папки Materials (корневой папки материалов)
+        # В этом случае НЕ копируем его, чтобы избежать дубликатов.
+        # Структура файлов внутри Materials считается приоритетной.
+        if source_abs.startswith(vault_materials_root_abs + os.sep):
+            # Возвращаем исходный путь, так как файл уже в хранилище
+            return source_path
+
+        # 3. Если файл снаружи -> копируем в стандартное место
         try:
-            shutil.copy2(source_path, material_file)
-            logger.debug(f"Скопирован материал: {material_file}")
-            return material_file
+            os.makedirs(materials_path, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+            logger.debug(f"Скопирован материал: {target_path}")
+            return target_path
         except PermissionError:
             logger.warning(f"Не удалось скопировать {topic_name}: файл занят или нет прав")
             return None
@@ -176,10 +188,10 @@ with Pool(4) as p:
             return None
 
     def generate(
-        self,
-        input_dir: str,
-        selected_categories: Optional[List[str]] = None,
-        clean_duplicates: bool = False
+            self,
+            input_dir: str,
+            selected_categories: Optional[List[str]] = None,
+            clean_duplicates: bool = False
     ) -> GenerationResult:
         """
         Выполняет генерацию карточек.
@@ -231,26 +243,49 @@ with Pool(4) as p:
 
             card_id += len(cards)
 
-            # Копирование материала в Vault
-            self.copy_material_to_vault(
+            # --- ИЗМЕНЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
+
+            # 1. Получаем реальный путь к файлу (без дублирования)
+            material_file_path = self.copy_material_to_vault(
                 topic_data['path'],
                 topic_name,
                 topic_category
             )
 
-            # Пути для генерации
+            # 2. Вычисляем правильную ссылку для Obsidian (относительно корня Vault)
+            if material_file_path:
+                try:
+                    # Получаем относительный путь от корня Obsidian Vault
+                    link_path = os.path.relpath(material_file_path, self.config.obsidian_vault)
+                    # Нормализуем слеши для Markdown/Obsidian
+                    link_path = link_path.replace('\\', '/')
+                    # Убираем расширение .md для красоты ссылки
+                    if link_path.endswith('.md'):
+                        link_path = link_path[:-3]
+                except ValueError:
+                    link_path = topic_name
+            else:
+                link_path = topic_name
+
+            # 3. Проставляем правильную ссылку во все карточки этой темы
+            for card in cards:
+                card.source_note = link_path
+
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
             cards_path = self.config.get_cards_path(topic_category)
             anki_path = os.path.join(self.config.output, "anki")
-            materials_path = self.config.get_materials_path(topic_category)
+            # materials_path больше не нужен для генерации ссылок, так как мы их уже проставили
 
             # Генерация файлов
             try:
+                # Передаем None в materials_path, чтобы избежать перезаписи ссылок в utils
                 files = generate_all_formats(
                     cards,
                     topic_category,
                     cards_path,
                     anki_path,
-                    materials_path
+                    materials_path=None
                 )
                 result.output_files.extend(files)
                 all_cards.extend(cards)

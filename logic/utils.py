@@ -705,20 +705,10 @@ def generate_all_formats(
     output_files: List[str] = []
 
     logger.info(f"Генерация для категории: {category}")
-    logger.info(f"Cards путь: {cards_output}")
-    logger.info(f"Anki путь: {anki_output}")
 
-    # Создаём директории
     os.makedirs(cards_output, exist_ok=True)
     os.makedirs(os.path.join(cards_output, 'anki_sync'), exist_ok=True)
     os.makedirs(anki_output, exist_ok=True)
-
-    # Обновляем ссылки на материалы
-    for card in cards:
-        if materials_path:
-            card.source_note = f"Interview/Materials/{category}/{card.topic}"
-        else:
-            card.source_note = card.topic
 
     # Obsidian карточки
     for card in cards:
