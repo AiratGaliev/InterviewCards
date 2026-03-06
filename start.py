@@ -31,6 +31,8 @@ if __name__ == '__main__':
 
     def click_button():
         st.session_state.clicked = True
+        st.session_state.generation_complete = False
+        st.session_state.generated_files = []
 
 
     def reset_button():
