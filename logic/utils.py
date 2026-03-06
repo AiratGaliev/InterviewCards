@@ -22,7 +22,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # =============================================================================
 # Константы
 # =============================================================================
@@ -416,18 +415,15 @@ def remove_spaced_repetition_tags(text: str) -> str:
 def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
     """
     Генерирует карточку для Obsidian Spaced Repetition.
-
-    Args:
-        card: Карточка для генерации
-        output_dir: Путь к папке вывода
-
-    Returns:
-        str: Путь к созданному файлу
+    Имя файла: {topic}_{id}.md
     """
     os.makedirs(output_dir, exist_ok=True)
 
+    # Добавляем ID к имени файла, чтобы избежать перезаписи при наличии нескольких карточек в одной теме
+    file_name = f"{card.topic}_{card.id}.md"
+    file_path = os.path.join(output_dir, file_name)
+
     markdown_content = card.to_markdown()
-    file_path = os.path.join(output_dir, f"{card.topic}.md")
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(markdown_content)
@@ -437,20 +433,13 @@ def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
 
 
 def generate_obsidian_merged_file(
-    cards: List[InterviewCard],
-    category: str,
-    output_dir: str
+        cards: List[InterviewCard],
+        topic_name: str,  # Изменено: принимаем имя темы, а не категории
+        output_dir: str
 ) -> str:
     """
-    Генерирует объединённый файл для категории (Obsidian_to_Anki формат).
-
-    Args:
-        cards: Список карточек
-        category: Имя категории
-        output_dir: Путь к папке вывода
-
-    Returns:
-        str: Путь к созданному файлу
+    Генерирует объединённый файл темы для Obsidian_to_Anki.
+    Имя файла: {topic}_to_anki.md
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -470,7 +459,9 @@ def generate_obsidian_merged_file(
         content_parts.append("---\n")
 
     content = '\n'.join(content_parts)
-    file_path = os.path.join(output_dir, f"{category}.md")
+
+    # Используем имя темы и суффикс _to_anki
+    file_path = os.path.join(output_dir, f"{topic_name}_to_anki.md")
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
@@ -484,31 +475,28 @@ def generate_obsidian_merged_file(
 # =============================================================================
 
 def generate_anki_import_file(
-    cards: List[InterviewCard],
-    category: str,
-    output_path: str,
-    deck_prefix: str = "Interview"
+        cards: List[InterviewCard],
+        topic_name: str,  # Изменено: принимаем имя темы
+        output_path: str,  # Это полный путь к файлу или папке? В оригинале было messy. Уточним.
+        deck_prefix: str = "Interview"
 ) -> str:
     """
     Генерирует файл для импорта в Anki.
-
-    Args:
-        cards: Список карточек
-        category: Имя категории
-        output_path: Путь к файлу вывода
-        deck_prefix: Префикс имени колоды
-
-    Returns:
-        str: Путь к созданному файлу
+    Имя файла: {topic}.txt
     """
-    # Создаём директорию если нужно
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+    # Определяем директорию вывода
+    # Если output_path это папка, создаем там файл. Если полный путь - используем как было.
+    # Для чистоты будем считать, что передаем директорию (для согласованности с generate_all_formats)
+    output_dir = output_path if os.path.isdir(output_path) else os.path.dirname(output_path)
+    os.makedirs(output_dir, exist_ok=True)
 
+    # Имя файла на основе темы
+    file_path = os.path.join(output_dir, f"{topic_name}.txt")
+
+    # Имя колоды оставляем на основе категории (берем из первой карточки)
+    category = cards[0].category if cards else "general"
     deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
 
-    # Заголовок Anki import
     header = "#separator:tab\n#html:true\n#deck column:3\n#tags column:5\n"
 
     cards_lines = []
@@ -519,12 +507,10 @@ def generate_anki_import_file(
         back = remove_obsidian_links(back)
         back = remove_spaced_repetition_tags(back)
 
-        # Добавляем фрагменты кода
         if card.code_snippets:
             for snippet in card.code_snippets:
                 back += "<br>" + format_code_for_anki(snippet)
 
-        # Формируем теги
         tags = ' '.join([f"interview/{tag}" for tag in card.tags if tag] +
                         [f"difficulty/{card.difficulty}"])
 
@@ -532,11 +518,11 @@ def generate_anki_import_file(
 
     content = header + '\n'.join(cards_lines)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    logger.info(f"Создан файл Anki: {output_path}")
-    return output_path
+    logger.info(f"Создан файл Anki: {file_path}")
+    return file_path
 
 
 # =============================================================================
@@ -605,6 +591,7 @@ def natural_sort(file_paths: List[str]) -> List[str]:
     Returns:
         List[str]: Отсортированный список
     """
+
     def natural_key(text: str) -> List:
         return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
 
@@ -649,10 +636,10 @@ def validate_markdown_structure(content: str) -> bool:
 
 
 def process_cards_batch(
-    cards: List[InterviewCard],
-    category: str,
-    output_dir: str,
-    batch_size: int = 500
+        cards: List[InterviewCard],
+        category: str,
+        output_dir: str,
+        batch_size: int = 500
 ) -> List[str]:
     """
     Обрабатывает карточки батчами для больших наборов данных.
@@ -683,50 +670,48 @@ def process_cards_batch(
 
 
 def generate_all_formats(
-    cards: List[InterviewCard],
-    category: str,
-    cards_output: str,
-    anki_output: str
+        cards: List[InterviewCard],
+        category: str,
+        cards_output: str,
+        anki_output: str
 ) -> List[str]:
     """
     Генерирует все форматы вывода карточек.
-
-    Args:
-        cards: Список карточек
-        category: Имя категории
-        cards_output: Путь к папке карточек Obsidian
-        anki_output: Путь к папке файлов Anki
-        materials_path: Путь к папке материалов (для ссылок)
-
-    Returns:
-        List[str]: Список путей к созданным файлам
+    Имена файлов связываются с названием темы (topic).
     """
     output_files: List[str] = []
 
-    logger.info(f"Генерация для категории: {category}")
+    if not cards:
+        return output_files
 
+    # Получаем имя темы из первой карточки (предполагаем, что все карточки из одного файла)
+    topic_name = cards[0].topic
+
+    logger.info(f"Генерация для темы: {topic_name} (Категория: {category})")
+
+    # Создаём директории
     os.makedirs(cards_output, exist_ok=True)
     os.makedirs(os.path.join(cards_output, 'anki_sync'), exist_ok=True)
     os.makedirs(anki_output, exist_ok=True)
 
-    # Obsidian карточки
+    # 1. Obsidian карточки (индивидуальные файлы)
     for card in cards:
         file_path = generate_obsidian_card(card, cards_output)
         output_files.append(file_path)
 
-    # Obsidian_to_Anki (промежуточный)
+    # 2. Obsidian_to_Anki (файл синхронизации) -> Имя: {topic}_to_anki.md
     merged_file = generate_obsidian_merged_file(
         cards,
-        category,
+        topic_name,
         os.path.join(cards_output, 'anki_sync')
     )
     output_files.append(merged_file)
 
-    # Anki Import
+    # 3. Anki Import (файл импорта) -> Имя: {topic}.txt
     anki_file = generate_anki_import_file(
         cards,
-        category,
-        os.path.join(anki_output, f"{category}.txt")
+        topic_name,
+        anki_output  # Передаем папку, функция сама создаст файл
     )
     output_files.append(anki_file)
 
