@@ -686,8 +686,7 @@ def generate_all_formats(
     cards: List[InterviewCard],
     category: str,
     cards_output: str,
-    anki_output: str,
-    materials_path: Optional[str] = None
+    anki_output: str
 ) -> List[str]:
     """
     Генерирует все форматы вывода карточек.

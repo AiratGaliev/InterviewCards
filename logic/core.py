@@ -243,13 +243,7 @@ class CardGenerator:
             # Генерация файлов
             try:
                 # Передаем None в materials_path, чтобы избежать перезаписи ссылок в utils
-                files = generate_all_formats(
-                    cards,
-                    topic_category,
-                    cards_path,
-                    anki_path,
-                    materials_path=None
-                )
+                files = generate_all_formats(cards, topic_category, cards_path, anki_path)
                 result.output_files.extend(files)
                 all_cards.extend(cards)
                 result.topics_processed += 1
