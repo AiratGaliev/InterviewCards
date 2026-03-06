@@ -80,57 +80,20 @@ class CardGenerator:
         os.makedirs(input_dir, exist_ok=True)
         example_path = os.path.join(input_dir, "example_topic.md")
 
-        # Контент по умолчанию
-        default_content = """---
-        tags: [interview/python]
-        difficulty: medium
-        category: python
-        ---
-        
-        # GIL в Python
-        
-        ## Теория
-        
-        **GIL (Global Interpreter Lock)** — это механизм в CPython, который позволяет только одному потоку выполнять байт-код.
-        
-        ## Ключевые моменты
-        
-        - Многопоточность не ускоряет CPU-bound задачи
-        - I/O-bound задачи всё ещё выигрывают от многопоточности
-        - Для CPU-bound задач используйте multiprocessing
-        
-        ### Вопрос: Что такое GIL в Python?
-        
-        Ответ: **GIL** — это механизм в CPython, который позволяет только одному потоку выполнять байт-код.
-        
-        **Последствия:**
-        
-        - Многопоточность не ускоряет CPU-bound задачи
-        - I/O-bound задачи всё ещё выигрывают от многопоточности
-        - Для CPU-bound задач используйте `multiprocessing`
-        
-        ### Вопрос: Когда использовать multiprocessing?
-        
-        Ответ: Используйте **multiprocessing** для CPU-bound задач.
-        
-        ```python
-        from multiprocessing import Pool
-        
-        with Pool(4) as p:
-            results = p.map(lambda x: x * x, range(10))
-        ```
-        
-        #card #interview
-        """
-
-        # Пробуем загрузить шаблон
-        content = default_content
+        # Пытаемся загрузить контент из файла шаблона
+        content = ""
         if template_path and os.path.exists(template_path):
             try:
                 with open(template_path, 'r', encoding='utf-8') as f:
                     content = f.read()
             except Exception as e:
-                logger.warning(f"Не удалось прочитать шаблон: {e}")
+                logger.error(f"Не удалось прочитать файл шаблона {template_path}: {e}")
+
+        # Если контент не удалось загрузить (файл отсутствует или ошибка чтения)
+        if not content:
+            logger.warning("Шаблон не найден или пуст. Создание пустого примера.")
+            # Можно создать минимальную заглушку или оставить пустым
+            content = "# Пример темы\n\nЗаполните этот файл данными."
 
         with open(example_path, 'w', encoding='utf-8') as f:
             f.write(content)

@@ -43,10 +43,10 @@ def display_paths_info(generator: CardGenerator):
     paths = generator.get_output_paths()
     with st.expander("📍 Информация о путях", expanded=False):
         st.code(f"""
-Obsidian Vault: {paths['obsidian_vault']}
-Материалы (исходники): {generator.config.materials_source}
-Карточки (генерация): {paths['cards']}
-Anki вывод: {paths['anki']}
+        Obsidian Vault: {paths['obsidian_vault']}
+        Материалы (исходники): {generator.config.materials_source}
+        Карточки (генерация): {paths['cards']}
+        Anki вывод: {paths['anki']}
         """)
 
 
