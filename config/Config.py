@@ -45,10 +45,8 @@ class AppConfig:
     max_question_length: int = 2000
     max_answer_length: int = 5000
 
-    # Теги Spaced Repetition (для обратной совместимости)
+    # Теги Spaced Repetition
     card_tag: str = "#flashcards"  # Основной тег колоды
-    topic_tag: str = ""  # Не используется в новом формате
-    difficulty_tag_prefix: str = ""  # Не используется в новом формате
 
     # Разделители карточек (по умолчанию в SR)
     single_line_basic_sep: str = "::"
@@ -109,10 +107,6 @@ class AppConfig:
 
         # Теги Spaced Repetition
         self.card_tag = self._config.get('spaced_repetition', 'card_tag', fallback='#flashcards')
-        self.topic_tag = self._config.get('spaced_repetition', 'topic_tag', fallback='')
-        self.difficulty_tag_prefix = self._config.get(
-            'spaced_repetition', 'difficulty_tag_prefix', fallback=''
-        )
 
         # Разделители
         self.single_line_basic_sep = self._config.get(

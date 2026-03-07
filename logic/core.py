@@ -141,6 +141,8 @@ class CardGenerator:
         # Пример карточки
         
         Что такое Spaced Repetition?::Метод обучения с повторением через увеличивающиеся интервалы
+        
+        #flashcards
         '''
 
     def copy_material_to_vault(

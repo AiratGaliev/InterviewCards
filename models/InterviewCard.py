@@ -124,15 +124,15 @@ def _get_config_limits():
         }
 
 
-# Допустимые уровни сложности
-VALID_DIFFICULTIES = frozenset(['easy', 'medium', 'hard'])
-
-
 @dataclass
 class InterviewCard:
     """
     Модель карточки для подготовки к интервью.
     Полностью совместима с Obsidian Spaced Repetition.
+
+    Из frontmatter материалов используются только:
+    - tags: список тегов
+    - category: категория материала
 
     Attributes:
         id: Уникальный идентификатор карточки
@@ -142,10 +142,9 @@ class InterviewCard:
         answer: Текст ответа (back side)
         card_type: Тип карточки (single-line, multi-line, cloze)
         code_snippets: Список фрагментов кода
-        difficulty: Уровень сложности (всегда "medium" по умолчанию)
-        tags: Список тегов из frontmatter материала
+        tags: Список тегов из frontmatter материала (включая метки сложности)
         source_note: Имя исходной заметки для ссылок
-        frontmatter: Метаданные из YAML frontmatter (только tags и category используются)
+        frontmatter: Метаданные из YAML frontmatter (используются только tags и category)
         created_at: Дата создания
         updated_at: Дата последнего обновления
         scheduling: Данные планирования SR
@@ -161,7 +160,6 @@ class InterviewCard:
     answer: str
     card_type: CardType = CardType.SINGLE_LINE_BASIC
     code_snippets: List[str] = field(default_factory=list)
-    difficulty: str = "medium"
     tags: List[str] = field(default_factory=list)
     source_note: Optional[str] = None
     frontmatter: Dict[str, Any] = field(default_factory=dict)
@@ -185,15 +183,22 @@ class InterviewCard:
             if self.max_answer_length is None:
                 self.max_answer_length = limits['max_answer_length']
 
-        # Нормализация сложности
-        if self.difficulty not in VALID_DIFFICULTIES:
-            self.difficulty = "medium"
-
         # Очистка строковых полей
         self.question = self.question.strip() if self.question else ""
         self.answer = self.answer.strip() if self.answer else ""
         self.topic = self.topic.strip() if self.topic else ""
         self.category = self.category.strip() if self.category else "general"
+
+        # Нормализация тегов - убираем пустые и дубликаты
+        if self.tags:
+            seen = set()
+            normalized = []
+            for tag in self.tags:
+                tag = tag.strip() if isinstance(tag, str) else str(tag)
+                if tag and tag not in seen:
+                    seen.add(tag)
+                    normalized.append(tag)
+            self.tags = normalized
 
     def validate(self) -> bool:
         """
@@ -373,8 +378,8 @@ class InterviewCard:
         front = self.question.replace('\n', '<br>')
         back = self.answer.replace('\n', '<br>')
 
-        # Формируем теги (без difficulty, так как она не из материалов)
-        tags = ' '.join([f"interview/{tag}" for tag in self.tags])
+        # Формируем теги из карточки
+        tags = ' '.join([f"interview/{tag}" for tag in self.tags if tag])
 
         if include_deck:
             deck_name = f"{deck_prefix}::{self.category.replace('_', ' ').title()}"
@@ -394,7 +399,6 @@ class InterviewCard:
             'answer': self.answer,
             'card_type': self.card_type.value,
             'code_snippets': self.code_snippets,
-            'difficulty': self.difficulty,
             'tags': self.tags,
             'source_note': self.source_note,
             'frontmatter': self.frontmatter,
@@ -479,7 +483,6 @@ class InterviewCard:
             answer=data.get('answer', ''),
             card_type=card_type,
             code_snippets=data.get('code_snippets', []),
-            difficulty=data.get('difficulty', 'medium'),
             tags=data.get('tags', []),
             source_note=data.get('source_note'),
             frontmatter=data.get('frontmatter', {}),
@@ -514,7 +517,6 @@ class InterviewCard:
             answer=self.question,  # Меняем местами
             card_type=self.card_type,
             code_snippets=self.code_snippets.copy(),
-            difficulty=self.difficulty,
             tags=self.tags.copy(),
             source_note=self.source_note,
             frontmatter=self.frontmatter.copy(),

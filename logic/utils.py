@@ -829,10 +829,14 @@ def generate_obsidian_topic_file(
         deck_name = "flashcards"
 
     # Frontmatter
+    category = cards[0].category if cards else 'general'
+    tags = cards[0].tags if cards else []
+    tags_str = ', '.join(tags) if tags else 'flashcards'
+
     frontmatter_lines = [
         "---",
-        f"tags: [flashcards]",
-        f"category: {cards[0].category if cards else 'general'}",
+        f"tags: [{tags_str}]",
+        f"category: {category}",
         "---",
         "",
         f"# {topic_name}",
