@@ -1,6 +1,14 @@
 """
 Основной модуль логики приложения InterviewCards.
 Содержит функции для парсинга Markdown и генерации карточек.
+Полностью совместим с Obsidian Spaced Repetition.
+
+Поддерживаемые форматы:
+- Single-line Basic: question::answer
+- Single-line Bidirectional: info1:::info2 (создает 2 карточки)
+- Multi-line Basic: question\\n?\\nanswer
+- Multi-line Bidirectional: info1\\n??\\ninfo2 (создает 2 карточки)
+- Cloze: text with ==hidden parts==
 """
 
 import glob
@@ -8,12 +16,14 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import yaml
 
-from models.InterviewCard import InterviewCard
+from models.InterviewCard import (
+    InterviewCard, CardType, ClozeDeletion, SchedulingData, VALID_DIFFICULTIES
+)
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,18 +33,47 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Константы
+# Константы и паттерны для Spaced Repetition
 # =============================================================================
+
+# Разделители карточек (по умолчанию в SR)
+SEPARATORS = {
+    'single_line_basic': '::',  # question::answer
+    'single_line_bidirectional': ':::',  # info1:::info2 (создает 2 карточки)
+    'multi_line_basic': '?',  # question\n?\nanswer
+    'multi_line_bidirectional': '??',  # info1\n??\ninfo2 (создает 2 карточки)
+}
 
 # Паттерны для парсинга Markdown
 PATTERNS = {
-    'question_answer': r'### Вопрос:\s*(.+?)\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
-    'card_format': r'#card\n\n(.+?)\n:::\n(.+?)(?=#card|$)',
-    'card_reverse_format': r'#card-reverse\n\n(.+?)\n:::\n(.+?)(?=#card-reverse|$)',
-    'header_content': r'^#\s*(.+?)\n\n---\n\n(.+?)(?=^#\s|#card|$)',
-    'code_block': r'```(?:python|javascript|java|sql|json|bash|typescript|go|rust)?\n(.+?)\n```',
+    # Форматы вопросов-ответов
+    'question_answer_v1': r'### Вопрос:\s*(.+?)\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
+    'question_answer_v2': r'### Вопрос:\s*(.+?)\n\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
+
+    # SR форматы
+    'single_line_basic': r'^(.+?)::(.+?)$',
+    'single_line_bidirectional': r'^(.+?):::(.+?)$',
+
+    # HTML комментарий с данными планирования
+    'scheduling_comment': r'<!--SR:(\d{4}-\d{2}-\d{2}),(\d+),(\d+)-->',
+
+    # Frontmatter
     'frontmatter': r'^---\n(.+?)\n---\n',
-    'header': r'^#\s*(.+?)$',
+
+    # Заголовок
+    'header': r'^#\s+(.+?)$',
+
+    # Блок кода
+    'code_block': r'```(?:python|javascript|java|sql|json|bash|typescript|go|rust)?\n(.+?)\n```',
+
+    # Cloze deletions
+    'cloze_simple': r'==(.+?)==',
+    'cloze_with_hint': r'==(.+?)==\^\[([^\]]*)\]',
+    'cloze_with_sequence': r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]',
+    'cloze_generalized': r'==(.+?)==\[\^([ahs]+)\]',
+
+    # Deck теги
+    'deck_tag': r'#flashcards(/[a-zA-Z0-9_/-]+)?',
 }
 
 # Языки программирования для подсветки кода
@@ -78,15 +117,19 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            # Парсим frontmatter один раз
+            # Парсим frontmatter
             frontmatter = extract_frontmatter(content)
+
+            # Определяем deck из тегов или структуры
+            deck_name = determine_deck_name(content, frontmatter, category)
 
             topics[topic_name] = {
                 'content': content,
                 'path': str(file_path),
                 'category': frontmatter.get('category', category),
                 'frontmatter': frontmatter,
-                'difficulty': frontmatter.get('difficulty', 'medium')
+                'difficulty': frontmatter.get('difficulty', 'medium'),
+                'deck_name': deck_name,
             }
 
         except Exception as e:
@@ -95,6 +138,35 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
 
     logger.info(f"Загружено тем: {len(topics)}")
     return topics
+
+
+def determine_deck_name(content: str, frontmatter: Dict, category: str) -> str:
+    """
+    Определяет имя колоды из тегов или frontmatter.
+
+    Приоритет:
+    1. Тег #flashcards/path/to/deck в контенте
+    2. Поле deck в frontmatter
+    3. Категория -> flashcards/category
+
+    Returns:
+        str: Имя колоды (без #, формат: flashcards/...)
+    """
+    # Ищем тег #flashcards/... в контенте
+    deck_match = re.search(PATTERNS['deck_tag'], content)
+    if deck_match:
+        deck = deck_match.group(0)[1:]  # Убираем #
+        return deck
+
+    # Проверяем frontmatter
+    if 'deck' in frontmatter:
+        deck = frontmatter['deck']
+        if not deck.startswith('flashcards'):
+            deck = f"flashcards/{deck}"
+        return deck
+
+    # По умолчанию - категория
+    return f"flashcards/{category}"
 
 
 def extract_frontmatter(content: str) -> Dict:
@@ -119,6 +191,26 @@ def extract_frontmatter(content: str) -> Dict:
         return {}
 
 
+def extract_scheduling_data(content: str) -> Optional[SchedulingData]:
+    """
+    Извлекает данные планирования из HTML комментария.
+
+    Args:
+        content: Текст карточки
+
+    Returns:
+        SchedulingData или None
+    """
+    match = re.search(PATTERNS['scheduling_comment'], content)
+    if match:
+        return SchedulingData(
+            next_review=match.group(1),
+            interval=int(match.group(2)),
+            ease=int(match.group(3))
+        )
+    return None
+
+
 def extract_card_metadata(content: str) -> Tuple[str, str, Dict]:
     """
     Извлекает метаданные карточки из контента.
@@ -140,15 +232,113 @@ def extract_card_metadata(content: str) -> Tuple[str, str, Dict]:
 
     # Сложность
     difficulty = frontmatter.get('difficulty', 'medium')
-    if difficulty not in ['easy', 'medium', 'hard']:
+    if difficulty not in VALID_DIFFICULTIES:
         difficulty = 'medium'
 
     return category, difficulty, frontmatter
 
 
+# =============================================================================
+# Парсинг карточек разных форматов
+# =============================================================================
+
+def detect_card_format(line: str) -> Optional[CardType]:
+    """
+    Определяет тип карточки по формату строки.
+
+    Args:
+        line: Строка для анализа
+
+    Returns:
+        CardType или None
+    """
+    line = line.strip()
+
+    # Single-line Bidirectional (3 двоеточия)
+    if ':::' in line and line.count(':::') == 1:
+        return CardType.SINGLE_LINE_BIDIRECTIONAL
+
+    # Single-line Basic (2 двоеточия)
+    if '::' in line and ':::' not in line:
+        # Проверяем, что это не часть кода
+        if not line.startswith('```') and not line.startswith('    '):
+            return CardType.SINGLE_LINE_BASIC
+
+    return None
+
+
+def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
+    """
+    Парсит cloze deletions из текста.
+
+    Поддерживаемые форматы:
+    - Simplified: ==text==
+    - With hint: ==text==^[hint]
+    - Classic: ==text==^[hint][^1]
+    - Generalized: ==text==[^ahhs]
+
+    Args:
+        text: Текст с cloze deletions
+
+    Returns:
+        List[ClozeDeletion]: Список найденных deletions
+    """
+    deletions = []
+
+    # Generalized cloze: ==text==[^ahhs]
+    for match in re.finditer(r'==(.+?)==\[\^([ahs]+)\]', text):
+        deletions.append(ClozeDeletion(
+            text=match.group(1),
+            position=match.start(),
+            actions=match.group(2),
+        ))
+
+    # Classic/Simplified with hint and sequence: ==text==^[hint][^1]
+    for match in re.finditer(r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]', text):
+        if not any(d.position == match.start() for d in deletions):
+            deletions.append(ClozeDeletion(
+                text=match.group(1),
+                position=match.start(),
+                hint=match.group(2) if match.group(2) else None,
+                sequence=int(match.group(3)),
+            ))
+
+    # With hint only: ==text==^[hint]
+    for match in re.finditer(r'==(.+?)==\^\[([^\]]+)\](?!\[\^)', text):
+        if not any(d.position == match.start() for d in deletions):
+            deletions.append(ClozeDeletion(
+                text=match.group(1),
+                position=match.start(),
+                hint=match.group(2),
+            ))
+
+    # Simple cloze: ==text==
+    for match in re.finditer(r'==(.+?)==', text):
+        # Проверяем, что это не уже обработанный формат
+        end_pos = match.end()
+        if end_pos < len(text) and text[end_pos:end_pos + 2] in ['^[', '[^']:
+            continue
+        if not any(d.position == match.start() for d in deletions):
+            deletions.append(ClozeDeletion(
+                text=match.group(1),
+                position=match.start(),
+            ))
+
+    # Сортируем по позиции
+    deletions.sort(key=lambda d: d.position)
+
+    return deletions
+
+
+def has_cloze_deletions(text: str) -> bool:
+    """Проверяет наличие cloze deletions в тексте"""
+    return bool(re.search(r'==.+?==', text))
+
+
 def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
     """
     Парсит карточки Spaced Repetition из Markdown файла.
+    Поддерживает все форматы SR.
 
     Args:
         file_path: Путь к Markdown файлу
@@ -169,32 +359,192 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
 
     topic_name = Path(file_path).stem
     category, difficulty, frontmatter = extract_card_metadata(content)
+    deck_name = determine_deck_name(content, frontmatter, category)
 
-    # Поиск вопросов по различным паттернам
-    all_questions: List[Tuple[str, str]] = []
+    # Удаляем frontmatter из контента для парсинга
+    content_without_fm = re.sub(PATTERNS['frontmatter'], '', content, count=1, flags=re.DOTALL)
 
-    # Паттерн 1: ### Вопрос: ... Ответ: ...
-    questions_v1 = re.findall(PATTERNS['question_answer'], content, re.DOTALL)
-    all_questions.extend(questions_v1)
+    all_cards = []
 
-    # Паттерн 2: #card формат (Obsidian_to_Anki)
-    questions_v2 = re.findall(PATTERNS['card_format'], content, re.DOTALL)
-    all_questions.extend(questions_v2)
+    # 1. Парсинг Single-line карточек (:: и :::)
+    for line in content_without_fm.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('```'):
+            continue
 
-    # Паттерн 2b: #card-reverse формат (двухсторонние карточки)
-    questions_v2b = re.findall(PATTERNS['card_reverse_format'], content, re.DOTALL)
-    all_questions.extend(questions_v2b)
+        card_type = detect_card_format(line)
+        if card_type:
+            if card_type == CardType.SINGLE_LINE_BASIC:
+                parts = line.split('::', 1)
+                if len(parts) == 2:
+                    question = parts[0].strip()
+                    answer = parts[1].strip()
 
-    # Паттерн 3: Заголовок как вопрос, контент после --- как ответ
-    questions_v3 = re.findall(PATTERNS['header_content'], content, re.MULTILINE | re.DOTALL)
-    all_questions.extend(questions_v3)
+                    # Проверяем на cloze в ответе
+                    if has_cloze_deletions(answer):
+                        cloze_deletions = parse_cloze_deletions(answer)
+                        card = InterviewCard(
+                            id=card_id,
+                            topic=topic_name,
+                            category=category,
+                            question=question,
+                            answer=answer,
+                            card_type=CardType.CLOZE,
+                            cloze_deletions=cloze_deletions,
+                            difficulty=difficulty,
+                            tags=frontmatter.get('tags', []),
+                            source_note=topic_name,
+                            deck_name=deck_name,
+                            frontmatter=frontmatter,
+                        )
+                        all_cards.append(card)
+                        card_id += 1
+                    else:
+                        card = InterviewCard(
+                            id=card_id,
+                            topic=topic_name,
+                            category=category,
+                            question=question,
+                            answer=answer,
+                            card_type=CardType.SINGLE_LINE_BASIC,
+                            difficulty=difficulty,
+                            tags=frontmatter.get('tags', []),
+                            source_note=topic_name,
+                            deck_name=deck_name,
+                            frontmatter=frontmatter,
+                        )
+                        all_cards.append(card)
+                        card_id += 1
 
-    # Обработка найденных вопросов
-    for q_text, a_text in all_questions:
-        # Извлечение фрагментов кода из ответа
+            elif card_type == CardType.SINGLE_LINE_BIDIRECTIONAL:
+                parts = line.split(':::', 1)
+                if len(parts) == 2:
+                    info1 = parts[0].strip()
+                    info2 = parts[1].strip()
+
+                    # Создаем первую карточку
+                    card1 = InterviewCard(
+                        id=card_id,
+                        topic=topic_name,
+                        category=category,
+                        question=info1,
+                        answer=info2,
+                        card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
+                        difficulty=difficulty,
+                        tags=frontmatter.get('tags', []),
+                        source_note=topic_name,
+                        deck_name=deck_name,
+                        frontmatter=frontmatter,
+                        is_reverse=False,
+                    )
+                    all_cards.append(card1)
+                    card_id += 1
+
+                    # Создаем карточку-близнеца (reverse)
+                    card2 = InterviewCard(
+                        id=card_id,
+                        topic=topic_name,
+                        category=category,
+                        question=info2,
+                        answer=info1,
+                        card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
+                        difficulty=difficulty,
+                        tags=frontmatter.get('tags', []),
+                        source_note=topic_name,
+                        deck_name=deck_name,
+                        frontmatter=frontmatter,
+                        is_reverse=True,
+                        sibling_id=card1.id,
+                    )
+                    all_cards.append(card2)
+                    card_id += 1
+
+    # 2. Парсинг Multi-line карточек (? и ??)
+    # Разделяем контент на секции по пустым строкам
+    sections = re.split(r'\n\s*\n', content_without_fm)
+
+    for section in sections:
+        # Multi-line Basic (?)
+        if '\n?\n' in section:
+            parts = section.split('\n?\n', 1)
+            if len(parts) == 2:
+                question = parts[0].strip()
+                answer = parts[1].strip()
+
+                # Извлекаем данные планирования
+                scheduling = extract_scheduling_data(section)
+
+                card = InterviewCard(
+                    id=card_id,
+                    topic=topic_name,
+                    category=category,
+                    question=question,
+                    answer=answer,
+                    card_type=CardType.MULTI_LINE_BASIC,
+                    difficulty=difficulty,
+                    tags=frontmatter.get('tags', []),
+                    source_note=topic_name,
+                    deck_name=deck_name,
+                    frontmatter=frontmatter,
+                    scheduling=scheduling,
+                )
+                all_cards.append(card)
+                card_id += 1
+
+        # Multi-line Bidirectional (??)
+        elif '\n??\n' in section:
+            parts = section.split('\n??\n', 1)
+            if len(parts) == 2:
+                info1 = parts[0].strip()
+                info2 = parts[1].strip()
+
+                scheduling = extract_scheduling_data(section)
+
+                # Первая карточка
+                card1 = InterviewCard(
+                    id=card_id,
+                    topic=topic_name,
+                    category=category,
+                    question=info1,
+                    answer=info2,
+                    card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
+                    difficulty=difficulty,
+                    tags=frontmatter.get('tags', []),
+                    source_note=topic_name,
+                    deck_name=deck_name,
+                    frontmatter=frontmatter,
+                    scheduling=scheduling,
+                    is_reverse=False,
+                )
+                all_cards.append(card1)
+                card_id += 1
+
+                # Карточка-близнец
+                card2 = InterviewCard(
+                    id=card_id,
+                    topic=topic_name,
+                    category=category,
+                    question=info2,
+                    answer=info1,
+                    card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
+                    difficulty=difficulty,
+                    tags=frontmatter.get('tags', []),
+                    source_note=topic_name,
+                    deck_name=deck_name,
+                    frontmatter=frontmatter,
+                    scheduling=scheduling,
+                    is_reverse=True,
+                    sibling_id=card1.id,
+                )
+                all_cards.append(card2)
+                card_id += 1
+
+    # 3. Парсинг старых форматов для обратной совместимости
+    # Формат: ### Вопрос: ... Ответ: ...
+    legacy_questions = re.findall(PATTERNS['question_answer_v1'], content_without_fm, re.DOTALL)
+    for q_text, a_text in legacy_questions:
         code_snippets = re.findall(PATTERNS['code_block'], a_text, re.DOTALL)
 
-        # Обработка тегов
         tags = frontmatter.get('tags', [])
         if isinstance(tags, str):
             tags = [tags]
@@ -206,18 +556,56 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             category=category,
             question=q_text.strip(),
             answer=a_text.strip(),
+            card_type=CardType.MULTI_LINE_BASIC,
             code_snippets=code_snippets,
             difficulty=difficulty,
             tags=tags,
             source_note=topic_name,
-            frontmatter=frontmatter
+            deck_name=deck_name,
+            frontmatter=frontmatter,
         )
+        all_cards.append(card)
+        card_id += 1
 
+    # 4. Парсинг Cloze карточек (отдельные строки с ==text==)
+    for line in content_without_fm.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('```'):
+            continue
+
+        # Пропускаем уже обработанные форматы
+        if '::' in line or ':::' in line:
+            continue
+
+        if has_cloze_deletions(line):
+            deletions = parse_cloze_deletions(line)
+            if deletions:
+                scheduling = extract_scheduling_data(line)
+
+                card = InterviewCard(
+                    id=card_id,
+                    topic=topic_name,
+                    category=category,
+                    question="",  # Для cloze вопрос - пустой
+                    answer=line,
+                    card_type=CardType.CLOZE,
+                    cloze_deletions=deletions,
+                    difficulty=difficulty,
+                    tags=frontmatter.get('tags', []),
+                    source_note=topic_name,
+                    deck_name=deck_name,
+                    frontmatter=frontmatter,
+                    scheduling=scheduling,
+                )
+                all_cards.append(card)
+                card_id += 1
+
+    # Валидация карточек
+    for card in all_cards:
         if card.validate():
             cards.append(card)
-            card_id += 1
 
-    # Если вопросов не найдено, создаём карточку из всего контента
+    # Если карточек не найдено, создаём карточку из всего контента
     if not cards:
         logger.info(f"Структурированные вопросы не найдены в {topic_name}, создаём карточку из контента")
         card = InterviewCard(
@@ -225,12 +613,14 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             topic=topic_name,
             category=category,
             question=f"Расскажите о: {topic_name}",
-            answer=content,
-            code_snippets=re.findall(PATTERNS['code_block'], content, re.DOTALL),
+            answer=content_without_fm,
+            card_type=CardType.MULTI_LINE_BASIC,
+            code_snippets=re.findall(PATTERNS['code_block'], content_without_fm, re.DOTALL),
             difficulty=difficulty,
             tags=[category],
             source_note=topic_name,
-            frontmatter=frontmatter
+            deck_name=deck_name,
+            frontmatter=frontmatter,
         )
         if card.validate():
             cards.append(card)
@@ -409,23 +799,31 @@ def remove_spaced_repetition_tags(text: str) -> str:
     text = re.sub(r'#card-reverse\s*', '', text)
     text = re.sub(r'#card\s*', '', text)
     text = re.sub(r'#interview\s*', '', text)
+    text = re.sub(r'#flashcards(/[a-zA-Z0-9_/-]+)?\s*', '', text)
     text = re.sub(r'#difficulty/\w+\s*', '', text)
 
     return text.strip()
 
 
 # =============================================================================
-# Генерация карточек для Obsidian
+# Генерация карточек для Obsidian Spaced Repetition
 # =============================================================================
 
 def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
     """
     Генерирует карточку для Obsidian Spaced Repetition.
     Имя файла: {topic}_{id}.md
+
+    Args:
+        card: Карточка
+        output_dir: Папка вывода
+
+    Returns:
+        str: Путь к созданному файлу
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Добавляем ID к имени файла, чтобы избежать перезаписи при наличии нескольких карточек в одной теме
+    # Добавляем ID к имени файла
     file_name = f"{card.topic}_{card.id}.md"
     file_path = os.path.join(output_dir, file_name)
 
@@ -438,48 +836,100 @@ def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
     return file_path
 
 
-def generate_obsidian_merged_file(
+def generate_obsidian_topic_file(
         cards: List[InterviewCard],
         topic_name: str,
         output_dir: str,
-        use_reverse_cards: bool = True
+        deck_name: str = None
 ) -> str:
     """
-    Генерирует объединённый файл темы для Obsidian_to_Anki.
-    Имя файла: {topic}_to_anki.md
+    Генерирует объединённый файл темы для Obsidian Spaced Repetition.
+    Все карточки в одном файле с правильными SR форматами.
+
+    Args:
+        cards: Список карточек
+        topic_name: Имя темы
+        output_dir: Папка вывода
+        deck_name: Имя колоды
+
+    Returns:
+        str: Путь к созданному файлу
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    content_parts = []
+    if not deck_name and cards:
+        deck_name = cards[0].deck_name
+    elif not deck_name:
+        deck_name = "flashcards"
+
+    # Frontmatter
+    frontmatter_lines = [
+        "---",
+        f"tags: [flashcards]",
+        f"created: {datetime.now().strftime('%Y-%m-%d')}",
+        "---",
+        "",
+        f"# {topic_name}",
+        "",
+    ]
+
+    content_parts = ['\n'.join(frontmatter_lines)]
 
     for card in cards:
-        answer = card.answer
-        answer = remove_obsidian_links(answer)
-        answer = remove_spaced_repetition_tags(answer)
+        # Разделитель между карточками
+        content_parts.append("---")
+        content_parts.append("")
 
-        # Используем #card-reverse для двухсторонних карточек
-        card_tag = "#card-reverse" if use_reverse_cards else "#card"
-        content_parts.append(f"{card_tag}\n\n{card.question}\n:::\n{answer}\n")
+        if card.card_type == CardType.CLOZE:
+            # Cloze карточка
+            content_parts.append(card.answer)
 
-        # Добавляем только уникальные сниппеты кода
-        if card.code_snippets:
-            for snippet in card.code_snippets:
-                # Проверяем, есть ли этот код уже в ответе
-                if snippet.strip() not in answer:
-                    content_parts.append(f"```python\n{snippet}\n```\n")
+        elif card.card_type == CardType.SINGLE_LINE_BASIC:
+            # Single-line Basic
+            content_parts.append(f"{card.question}::{card.answer}")
 
-        content_parts.append("---\n")
+        elif card.card_type == CardType.SINGLE_LINE_BIDIRECTIONAL:
+            # Single-line Bidirectional (только одна карточка, sibling создаётся отдельно)
+            if not card.is_reverse:
+                content_parts.append(f"{card.question}:::{card.answer}")
+
+        elif card.card_type == CardType.MULTI_LINE_BASIC:
+            # Multi-line Basic
+            content_parts.append(card.question)
+            content_parts.append("?")
+            content_parts.append(card.answer)
+
+        elif card.card_type == CardType.MULTI_LINE_BIDIRECTIONAL:
+            # Multi-line Bidirectional (только одна карточка)
+            if not card.is_reverse:
+                content_parts.append(card.question)
+                content_parts.append("??")
+                content_parts.append(card.answer)
+
+        # Добавляем данные планирования если есть
+        if card.scheduling:
+            scheduling_comment = card.scheduling.to_html_comment()
+            if scheduling_comment:
+                content_parts.append("")
+                content_parts.append(scheduling_comment)
+
+        content_parts.append("")
+
+    # Тег колоды в конце файла
+    content_parts.append(f"#{deck_name}")
 
     content = '\n'.join(content_parts)
 
-    # Используем имя темы и суффикс _to_anki
-    file_path = os.path.join(output_dir, f"{topic_name}_to_anki.md")
+    file_path = os.path.join(output_dir, f"{topic_name}.md")
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    logger.info(f"Создан объединённый файл: {file_path}")
+    logger.info(f"Создан файл темы: {file_path}")
     return file_path
+
+
+from datetime import datetime
 
 
 # =============================================================================
@@ -488,24 +938,28 @@ def generate_obsidian_merged_file(
 
 def generate_anki_import_file(
         cards: List[InterviewCard],
-        topic_name: str,  # Изменено: принимаем имя темы
-        output_path: str,  # Это полный путь к файлу или папке? В оригинале было messy. Уточним.
+        topic_name: str,
+        output_path: str,
         deck_prefix: str = "Interview"
 ) -> str:
     """
     Генерирует файл для импорта в Anki.
     Имя файла: {topic}.txt
+
+    Args:
+        cards: Список карточек
+        topic_name: Имя темы
+        output_path: Папка вывода
+        deck_prefix: Префикс колоды
+
+    Returns:
+        str: Путь к созданному файлу
     """
-    # Определяем директорию вывода
-    # Если output_path это папка, создаем там файл. Если полный путь - используем как было.
-    # Для чистоты будем считать, что передаем директорию (для согласованности с generate_all_formats)
     output_dir = output_path if os.path.isdir(output_path) else os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Имя файла на основе темы
     file_path = os.path.join(output_dir, f"{topic_name}.txt")
 
-    # Имя колоды оставляем на основе категории (берем из первой карточки)
     category = cards[0].category if cards else "general"
     deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
 
@@ -519,10 +973,9 @@ def generate_anki_import_file(
         back = remove_obsidian_links(back)
         back = remove_spaced_repetition_tags(back)
 
-        # Добавляем только уникальные сниппеты кода
+        # Добавляем уникальные сниппеты кода
         if card.code_snippets:
             for snippet in card.code_snippets:
-                # Проверяем, есть ли код в ответе
                 if snippet.strip() not in card.answer:
                     back += "<br>" + format_code_for_anki(snippet)
 
@@ -643,12 +1096,19 @@ def validate_markdown_structure(content: str) -> bool:
     Returns:
         bool: True если структура валидна
     """
-    has_question = bool(re.search(r'### Вопрос:', content))
-    has_card = bool(re.search(r'#card', content))
-    has_card_reverse = bool(re.search(r'#card-reverse', content))
-    has_header = bool(re.search(r'^#\s+', content, re.MULTILINE))
+    # SR форматы
+    has_single_basic = bool(re.search(r'[^:]::[^:]', content))
+    has_single_bidirectional = bool(re.search(r':::', content))
+    has_multi_basic = bool(re.search(r'\n\?\n', content))
+    has_multi_bidirectional = bool(re.search(r'\n\?\?\n', content))
+    has_cloze = bool(re.search(r'==.+?==', content))
 
-    return has_question or has_card or has_card_reverse or has_header
+    # Legacy формат
+    has_question = bool(re.search(r'### Вопрос:', content))
+
+    return (has_single_basic or has_single_bidirectional or
+            has_multi_basic or has_multi_bidirectional or
+            has_cloze or has_question)
 
 
 def process_cards_batch(
@@ -694,42 +1154,56 @@ def generate_all_formats(
 ) -> List[str]:
     """
     Генерирует все форматы вывода карточек.
-    Имена файлов связываются с названием темы (topic).
+
+    Args:
+        cards: Список карточек
+        category: Категория
+        cards_output: Папка для Obsidian карточек
+        anki_output: Папка для Anki файлов
+        use_reverse_cards: Использовать обратные карточки
+
+    Returns:
+        List[str]: Список путей к созданным файлам
     """
     output_files: List[str] = []
 
     if not cards:
         return output_files
 
-    # Получаем имя темы из первой карточки (предполагаем, что все карточки из одного файла)
     topic_name = cards[0].topic
+    deck_name = cards[0].deck_name
 
-    logger.info(f"Генерация для темы: {topic_name} (Категория: {category})")
+    logger.info(f"Генерация для темы: {topic_name} (Категория: {category}, Deck: {deck_name})")
 
     # Создаём директории
     os.makedirs(cards_output, exist_ok=True)
-    os.makedirs(os.path.join(cards_output, 'anki_sync'), exist_ok=True)
     os.makedirs(anki_output, exist_ok=True)
 
     # 1. Obsidian карточки (индивидуальные файлы)
     for card in cards:
+        # Пропускаем reverse карточки если отключены
+        if card.is_reverse and not use_reverse_cards:
+            continue
         file_path = generate_obsidian_card(card, cards_output)
         output_files.append(file_path)
 
-    # 2. Obsidian_to_Anki (файл синхронизации) -> Имя: {topic}_to_anki.md
-    merged_file = generate_obsidian_merged_file(
-        cards,
-        topic_name,
-        os.path.join(cards_output, 'anki_sync'),
-        use_reverse_cards=use_reverse_cards
-    )
-    output_files.append(merged_file)
+    # 2. Объединённый файл темы для SR
+    # Фильтруем reverse карточки для объединённого файла
+    main_cards = [c for c in cards if not c.is_reverse] if use_reverse_cards else cards
+    if main_cards:
+        merged_file = generate_obsidian_topic_file(
+            main_cards,
+            topic_name,
+            cards_output,
+            deck_name
+        )
+        output_files.append(merged_file)
 
-    # 3. Anki Import (файл импорта) -> Имя: {topic}.txt
+    # 3. Anki Import файл
     anki_file = generate_anki_import_file(
         cards,
         topic_name,
-        anki_output  # Передаем папку, функция сама создаст файл
+        anki_output
     )
     output_files.append(anki_file)
 

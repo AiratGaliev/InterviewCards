@@ -2,12 +2,12 @@
 Модуль логики InterviewCards.
 """
 
+from logic.core import CardGenerator, GenerationResult
 from logic.utils import (
     load_markdown_topics,
     parse_cards_from_markdown,
     parse_all_markdown_files,
     generate_obsidian_card,
-    generate_obsidian_merged_file,
     generate_anki_import_file,
     generate_all_formats,
     clean_up_duplicates,
@@ -18,7 +18,6 @@ from logic.utils import (
     validate_markdown_structure,
     process_cards_batch,
 )
-from logic.core import CardGenerator, GenerationResult
 
 __all__ = [
     # utils
@@ -26,7 +25,6 @@ __all__ = [
     'parse_cards_from_markdown',
     'parse_all_markdown_files',
     'generate_obsidian_card',
-    'generate_obsidian_merged_file',
     'generate_anki_import_file',
     'generate_all_formats',
     'clean_up_duplicates',

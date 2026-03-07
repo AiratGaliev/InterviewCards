@@ -50,19 +50,27 @@ def display_paths_info(generator: CardGenerator):
         """)
 
 
-def display_generation_result(result: GenerationResult):
-    """Отображает результат генерации"""
+def display_generation_result(result: GenerationResult, show_warnings: bool = True):
+    """
+    Отображает результат генерации.
+
+    Args:
+        result: Результат генерации
+        show_warnings: Показывать ли предупреждения в expander (False если внутри status)
+    """
     if result.success:
         st.success(f"### ✅ Генерация завершена!")
-        st.metric("Всего карточек", result.total_cards)
-        st.metric("Тем обработано", result.topics_processed)
-        st.metric("Файлов создано", len(result.output_files))
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Всего карточек", result.total_cards)
+        col2.metric("Тем обработано", result.topics_processed)
+        col3.metric("Файлов создано", len(result.output_files))
     else:
         st.error("❌ Генерация не удалась")
         for error in result.errors:
             st.error(error)
 
-    if result.warnings:
+    # Предупреждения показываем только снаружи status блока
+    if show_warnings and result.warnings:
         with st.expander("⚠️ Предупреждения", expanded=False):
             for warning in result.warnings:
                 st.warning(warning)
@@ -106,6 +114,9 @@ def display_statistics(files: list, selected_categories: list):
                         total_cards += len(lines)
                     else:
                         total_cards += content.count('#card')
+                        # Также считаем новые форматы SR
+                        total_cards += content.count('::') - content.count(':::')  # single-line basic
+                        total_cards += content.count(':::')  # bidirectional (создает 2 карточки)
                 except Exception:
                     continue
 
@@ -181,7 +192,7 @@ def main():
         is_clean_duplicates = st.checkbox("Удалить дубликаты", value=False)
 
         st.markdown("---")
-        st.info(f"Тег карточки: `{config.card_tag}`")
+        st.info(f"Тег колоды: `#flashcards/<category>`")
 
         if st.session_state.clicked:
             st.button("🔄 Сбросить", on_click=reset_button, use_container_width=True)
@@ -208,11 +219,16 @@ def main():
                         st.markdown(preview_content)
 
                     topic_data = topics[selected_topic]
-                    cards_count = max(
-                        1,
-                        len(topic_data['content'].split('#card')) - 1
-                        if '#card' in topic_data['content'] else 1
+                    # Подсчёт карточек разных форматов
+                    content = topic_data['content']
+                    cards_count = (
+                            content.count('::') - content.count(':::') +  # single-line basic
+                            content.count(':::') * 2 +  # bidirectional (2 карточки)
+                            content.count('\n?\n') +  # multi-line basic
+                            content.count('\n??\n') * 2 +  # multi-line bidirectional
+                            content.count('#card')  # legacy формат
                     )
+                    cards_count = max(1, cards_count)
                     st.metric("Карточек в теме", cards_count)
             else:
                 st.warning("⚠️ Нет Markdown файлов в папке")
@@ -237,36 +253,33 @@ def main():
             st.error("❌ Папка с Markdown файлами не найдена!")
             st.session_state.clicked = False
         else:
-            with st.status("🚧 Обработка Markdown файлов...", expanded=True) as status:
-                try:
+            # Генерация БЕЗ status блока, чтобы избежать вложенности expander
+            try:
+                with st.spinner("🚧 Обработка Markdown файлов..."):
                     result = generator.generate(
                         input_dir=input_dir,
                         selected_categories=selected_categories or None,
                         clean_duplicates=is_clean_duplicates
                     )
 
-                    st.session_state.last_result = result
-                    st.session_state.generated_files = result.output_files
-                    st.session_state.clicked = False
-                    st.session_state.generation_complete = True
+                st.session_state.last_result = result
+                st.session_state.generated_files = result.output_files
+                st.session_state.clicked = False
+                st.session_state.generation_complete = True
 
-                    display_generation_result(result)
+                # Отображаем результат ПОСЛЕ завершения spinner
+                display_generation_result(result)
 
-                    status.update(
-                        label=f"🏁 Готово! Сгенерировано {result.total_cards} карточек",
-                        state="complete"
-                    )
+                st.rerun()
 
-                    st.rerun()
-
-                except Exception as e:
-                    status.update(label="❌ Ошибка генерации", state="error")
-                    st.error(f"Произошла ошибка: {e}")
+            except Exception as e:
+                st.error(f"❌ Произошла ошибка: {e}")
+                with st.expander("🔍 Детали ошибки"):
                     st.code(traceback.format_exc())
-                    st.session_state.clicked = False
+                st.session_state.clicked = False
 
-    # Отображение результатов
-    if st.session_state.last_result:
+    # Отображение результатов (при rerun)
+    if st.session_state.last_result and st.session_state.generation_complete:
         display_generation_result(st.session_state.last_result)
 
     # Кнопки скачивания

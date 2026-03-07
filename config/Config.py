@@ -1,6 +1,7 @@
 """
 Модуль конфигурации приложения InterviewCards.
-Использует dataclass вместо Enum для лучшей типизации и читаемости.
+Использует dataclass для типизации и читаемости.
+Полностью совместим с Obsidian Spaced Repetition.
 """
 
 import configparser
@@ -19,7 +20,11 @@ load_dotenv()
 class AppConfig:
     """
     Класс конфигурации приложения.
-    Загружает настройки из config.ini и предоставляет к ним удобный доступ.
+    Загружает настройки из config.ini и предоставляет удобный доступ.
+
+    Совместимость с Obsidian Spaced Repetition:
+    - Deck теги: #flashcards/category
+    - Форматы: ::, :::, ?, ??, Cloze
     """
     _config_path: str = "config.ini"
     _config: configparser.ConfigParser = field(default_factory=configparser.ConfigParser, repr=False)
@@ -40,10 +45,20 @@ class AppConfig:
     max_question_length: int = 2000
     max_answer_length: int = 5000
 
-    # Теги Spaced Repetition
-    card_tag: str = "#card"
-    topic_tag: str = "#interview"
-    difficulty_tag_prefix: str = "difficulty/"
+    # Теги Spaced Repetition (для обратной совместимости)
+    card_tag: str = "#flashcards"  # Основной тег колоды
+    topic_tag: str = ""  # Не используется в новом формате
+    difficulty_tag_prefix: str = ""  # Не используется в новом формате
+
+    # Разделители карточек (по умолчанию в SR)
+    single_line_basic_sep: str = "::"
+    single_line_bidirectional_sep: str = ":::"
+    multi_line_basic_sep: str = "?"
+    multi_line_bidirectional_sep: str = "??"
+
+    # Cloze настройки
+    cloze_start: str = "=="
+    cloze_end: str = "=="
 
     def __post_init__(self):
         """Загрузка конфигурации после инициализации"""
@@ -92,12 +107,30 @@ class AppConfig:
             'limits', 'max_answer_length', fallback=5000
         )
 
-        # Теги
-        self.card_tag = self._config.get('spaced_repetition', 'card_tag', fallback='#card')
-        self.topic_tag = self._config.get('spaced_repetition', 'topic_tag', fallback='#interview')
+        # Теги Spaced Repetition
+        self.card_tag = self._config.get('spaced_repetition', 'card_tag', fallback='#flashcards')
+        self.topic_tag = self._config.get('spaced_repetition', 'topic_tag', fallback='')
         self.difficulty_tag_prefix = self._config.get(
-            'spaced_repetition', 'difficulty_tag_prefix', fallback='difficulty/'
+            'spaced_repetition', 'difficulty_tag_prefix', fallback=''
         )
+
+        # Разделители
+        self.single_line_basic_sep = self._config.get(
+            'separators', 'single_line_basic', fallback='::'
+        )
+        self.single_line_bidirectional_sep = self._config.get(
+            'separators', 'single_line_bidirectional', fallback=':::'
+        )
+        self.multi_line_basic_sep = self._config.get(
+            'separators', 'multi_line_basic', fallback='?'
+        )
+        self.multi_line_bidirectional_sep = self._config.get(
+            'separators', 'multi_line_bidirectional', fallback='??'
+        )
+
+        # Cloze настройки
+        self.cloze_start = self._config.get('cloze', 'start', fallback='==')
+        self.cloze_end = self._config.get('cloze', 'end', fallback='==')
 
     @staticmethod
     def _parse_categories(categories_str: str) -> List[str]:
@@ -147,17 +180,69 @@ class AppConfig:
         return True
 
     def get_anki_deck_name(self, category: str) -> str:
-        """Формирует имя колоды Anki для категории"""
+        """
+        Формирует имя колоды Anki для категории.
+
+        Args:
+            category: Категория карточек
+
+        Returns:
+            str: Имя колоды Anki (например, "Interview::Python")
+        """
         formatted_category = category.replace('_', ' ').title()
         return f"Interview::{formatted_category}"
 
+    def get_deck_tag(self, category: str) -> str:
+        """
+        Генерирует тег колоды для Spaced Repetition.
+
+        Args:
+            category: Категория карточек
+
+        Returns:
+            str: Тег колоды (например, "#flashcards/python")
+        """
+        if not category or category == 'general':
+            return "#flashcards"
+        return f"#flashcards/{category}"
+
     def get_cards_path(self, category: str) -> str:
-        """Возвращает путь к папке карточек для категории"""
+        """
+        Возвращает путь к папке карточек для категории.
+
+        Args:
+            category: Категория карточек
+
+        Returns:
+            str: Путь к папке карточек
+        """
         return os.path.join(self.obsidian_vault, "Interview", "Cards", category)
 
     def get_materials_path(self, category: str) -> str:
-        """Возвращает путь к папке материалов для категории"""
+        """
+        Возвращает путь к папке материалов для категории.
+
+        Args:
+            category: Категория карточек
+
+        Returns:
+            str: Путь к папке материалов
+        """
         return os.path.join(self.obsidian_vault, "Interview", "Materials", category)
+
+    def get_separators(self) -> dict:
+        """
+        Возвращает словарь разделителей карточек.
+
+        Returns:
+            dict: Словарь с разделителями для всех типов карточек
+        """
+        return {
+            'single_line_basic': self.single_line_basic_sep,
+            'single_line_bidirectional': self.single_line_bidirectional_sep,
+            'multi_line_basic': self.multi_line_basic_sep,
+            'multi_line_bidirectional': self.multi_line_bidirectional_sep,
+        }
 
 
 # Глобальный экземпляр конфигурации (singleton pattern)
@@ -168,6 +253,12 @@ def get_config(config_path: str = "config.ini") -> AppConfig:
     """
     Возвращает глобальный экземпляр конфигурации.
     Создаёт новый при первом вызове.
+
+    Args:
+        config_path: Путь к файлу конфигурации
+
+    Returns:
+        AppConfig: Экземпляр конфигурации
     """
     global _config_instance
     if _config_instance is None:

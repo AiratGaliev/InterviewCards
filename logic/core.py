@@ -1,6 +1,7 @@
 """
 Основной модуль с общей логикой генерации карточек.
 Используется как Streamlit, так и CLI версиями.
+Полностью совместим с Obsidian Spaced Repetition.
 """
 
 import logging
@@ -36,6 +37,13 @@ class CardGenerator:
     """
     Класс для генерации карточек из Markdown файлов.
     Инкапсулирует общую логику для Streamlit и CLI версий.
+
+    Совместим с Obsidian Spaced Repetition форматами:
+    - Single-line Basic: question::answer
+    - Single-line Bidirectional: info1:::info2
+    - Multi-line Basic: question\\n?\\nanswer
+    - Multi-line Bidirectional: info1\\n??\\ninfo2
+    - Cloze: text with ==hidden parts==
     """
 
     def __init__(self, config: AppConfig, use_reverse_cards: bool = True):
@@ -44,7 +52,7 @@ class CardGenerator:
 
         Args:
             config: Конфигурация приложения
-            use_reverse_cards: Использовать двухсторонние карточки (по умолчанию True)
+            use_reverse_cards: Использовать двухсторонние карточки
         """
         self.config = config
         self.use_reverse_cards = use_reverse_cards
@@ -91,16 +99,51 @@ class CardGenerator:
             except Exception as e:
                 logger.error(f"Не удалось прочитать файл шаблона {template_path}: {e}")
 
-        # Если контент не удалось загрузить (файл отсутствует или ошибка чтения)
+        # Если контент не удалось загрузить - читаем из templates/example_topic.md
         if not content:
-            logger.warning("Шаблон не найден или пуст. Создание пустого примера.")
-            # Можно создать минимальную заглушку или оставить пустым
-            content = "# Пример темы\n\nЗаполните этот файл данными."
+            content = self._get_example_content()
 
-        with open(example_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        if content:
+            with open(example_path, 'w', encoding='utf-8') as f:
+                f.write(content)
 
         return example_path
+
+    def _get_example_content(self) -> str:
+        """
+        Загружает пример контента из файла шаблона templates/example_topic.md.
+
+        Returns:
+            str: Пример Markdown контента или пустая строка
+        """
+        # Определяем путь к файлу шаблона относительно текущего файла
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        template_path = os.path.join(current_dir, "..", "templates", "example_topic.md")
+
+        # Пытаемся загрузить контент из шаблона
+        if os.path.exists(template_path):
+            try:
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content:
+                        return content
+            except Exception as e:
+                logger.error(f"Не удалось прочитать файл шаблона {template_path}: {e}")
+
+        # Fallback: минимальный пример если шаблон не найден
+        logger.warning(f"Файл шаблона не найден: {template_path}, используется минимальный пример")
+        return '''---
+        tags: [flashcards/example]
+        difficulty: medium
+        category: general
+        ---
+        
+        # Пример карточки
+        
+        Что такое Spaced Repetition?::Метод обучения с повторением через увеличивающиеся интервалы
+        
+        #flashcards
+        '''
 
     def copy_material_to_vault(
             self,
@@ -120,7 +163,6 @@ class CardGenerator:
             Optional[str]: Путь к скопированному файлу или None
         """
         materials_path = self.config.get_materials_path(category)
-
         target_path = os.path.join(materials_path, f"{topic_name}.md")
 
         # Нормализация путей для сравнения
@@ -128,18 +170,15 @@ class CardGenerator:
         target_abs = os.path.abspath(target_path)
         vault_materials_root_abs = os.path.abspath(self.config.materials_source)
 
-        # 1. Если исходный файл уже находится в целевой папке категории
+        # 1. Если исходный файл уже находится в целевой папке
         if source_abs == target_abs:
             return target_path
 
-        # 2. Если исходный файл уже находится внутри папки Materials (корневой папки материалов)
-        # В этом случае НЕ копируем его, чтобы избежать дубликатов.
-        # Структура файлов внутри Materials считается приоритетной.
+        # 2. Если файл уже внутри папки Materials
         if source_abs.startswith(vault_materials_root_abs + os.sep):
-            # Возвращаем исходный путь, так как файл уже в хранилище
             return source_path
 
-        # 3. Если файл снаружи -> копируем в стандартное место
+        # 3. Копируем файл
         try:
             os.makedirs(materials_path, exist_ok=True)
             shutil.copy2(source_path, target_path)
@@ -208,21 +247,18 @@ class CardGenerator:
 
             card_id += len(cards)
 
-            # 1. Получаем реальный путь к файлу (без дублирования)
+            # Получаем путь к файлу материала
             material_file_path = self.copy_material_to_vault(
                 topic_data['path'],
                 topic_name,
                 topic_category
             )
 
-            # 2. Вычисляем правильную ссылку для Obsidian (относительно корня Vault)
+            # Вычисляем ссылку для Obsidian
             if material_file_path:
                 try:
-                    # Получаем относительный путь от корня Obsidian Vault
                     link_path = os.path.relpath(material_file_path, self.config.obsidian_vault)
-                    # Нормализуем слеши для Markdown/Obsidian
                     link_path = link_path.replace('\\', '/')
-                    # Убираем расширение .md для красоты ссылки
                     if link_path.endswith('.md'):
                         link_path = link_path[:-3]
                 except ValueError:
@@ -230,7 +266,7 @@ class CardGenerator:
             else:
                 link_path = topic_name
 
-            # 3. Проставляем правильную ссылку во все карточки этой темы
+            # Проставляем ссылку во все карточки
             for card in cards:
                 card.source_note = link_path
 
