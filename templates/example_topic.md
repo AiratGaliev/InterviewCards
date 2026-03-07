@@ -1,9 +1,6 @@
 ---
 tags: [ flashcards/python, interview ]
-difficulty: medium
 category: python
-deck: flashcards/python
-created: 2024-01-15
 ---
 
 # Примеры форматов Spaced Repetition
@@ -101,7 +98,3 @@ def my_decorator(func):
 def say_hello():
     print("Hello!")
 ```
-
----
-
-#flashcards/python

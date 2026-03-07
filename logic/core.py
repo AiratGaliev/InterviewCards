@@ -41,8 +41,8 @@ class CardGenerator:
     Совместим с Obsidian Spaced Repetition форматами:
     - Single-line Basic: question::answer
     - Single-line Bidirectional: info1:::info2
-    - Multi-line Basic: question\\n?\\nanswer
-    - Multi-line Bidirectional: info1\\n??\\ninfo2
+    - Multi-line Basic: question\n?\nanswer
+    - Multi-line Bidirectional: info1\n??\ninfo2
     - Cloze: text with ==hidden parts==
     """
 
@@ -131,18 +131,16 @@ class CardGenerator:
                 logger.error(f"Не удалось прочитать файл шаблона {template_path}: {e}")
 
         # Fallback: минимальный пример если шаблон не найден
+        # Соответствует формату templates/example_topic.md
         logger.warning(f"Файл шаблона не найден: {template_path}, используется минимальный пример")
         return '''---
         tags: [flashcards/example]
-        difficulty: medium
         category: general
         ---
         
         # Пример карточки
         
         Что такое Spaced Repetition?::Метод обучения с повторением через увеличивающиеся интервалы
-        
-        #flashcards
         '''
 
     def copy_material_to_vault(

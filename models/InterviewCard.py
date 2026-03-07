@@ -142,10 +142,10 @@ class InterviewCard:
         answer: Текст ответа (back side)
         card_type: Тип карточки (single-line, multi-line, cloze)
         code_snippets: Список фрагментов кода
-        difficulty: Уровень сложности (easy, medium, hard)
-        tags: Список тегов
+        difficulty: Уровень сложности (всегда "medium" по умолчанию)
+        tags: Список тегов из frontmatter материала
         source_note: Имя исходной заметки для ссылок
-        frontmatter: Метаданные из YAML frontmatter
+        frontmatter: Метаданные из YAML frontmatter (только tags и category используются)
         created_at: Дата создания
         updated_at: Дата последнего обновления
         scheduling: Данные планирования SR
@@ -291,12 +291,7 @@ class InterviewCard:
         frontmatter_lines = [
             "---",
             f"tags: [{self.get_formatted_tags()}]",
-            f"created: {self.created_at.strftime('%Y-%m-%d')}",
-            f"updated: {self.updated_at.strftime('%Y-%m-%d')}",
-            f"source: \"[[{self.source_note}]]\"" if self.source_note else "source: ",
-            f"difficulty: {self.difficulty}",
             f"category: {self.category}",
-            f"card_type: {self.card_type.value}",
             "---",
             "",
         ]
@@ -378,8 +373,8 @@ class InterviewCard:
         front = self.question.replace('\n', '<br>')
         back = self.answer.replace('\n', '<br>')
 
-        # Формируем теги
-        tags = ' '.join([f"interview/{tag}" for tag in self.tags] + [f"difficulty/{self.difficulty}"])
+        # Формируем теги (без difficulty, так как она не из материалов)
+        tags = ' '.join([f"interview/{tag}" for tag in self.tags])
 
         if include_deck:
             deck_name = f"{deck_prefix}::{self.category.replace('_', ' ').title()}"

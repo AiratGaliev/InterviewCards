@@ -6,8 +6,8 @@
 Поддерживаемые форматы:
 - Single-line Basic: question::answer
 - Single-line Bidirectional: info1:::info2 (создает 2 карточки)
-- Multi-line Basic: question\\n?\\nanswer
-- Multi-line Bidirectional: info1\\n??\\ninfo2 (создает 2 карточки)
+- Multi-line Basic: question\n?\nanswer
+- Multi-line Bidirectional: info1\n??\ninfo2 (создает 2 карточки)
 - Cloze: text with ==hidden parts==
 """
 
@@ -15,7 +15,6 @@ import glob
 import logging
 import os
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -23,7 +22,7 @@ import pandas as pd
 import yaml
 
 from models.InterviewCard import (
-    InterviewCard, CardType, ClozeDeletion, SchedulingData, VALID_DIFFICULTIES
+    InterviewCard, CardType, ClozeDeletion, SchedulingData
 )
 
 # Настройка логирования
@@ -129,7 +128,6 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
                 'path': str(file_path),
                 'category': frontmatter.get('category', category),
                 'frontmatter': frontmatter,
-                'difficulty': frontmatter.get('difficulty', 'medium'),
                 'deck_name': deck_name,
             }
 
@@ -212,15 +210,16 @@ def extract_scheduling_data(content: str) -> Optional[SchedulingData]:
     return None
 
 
-def extract_card_metadata(content: str) -> Tuple[str, str, Dict]:
+def extract_card_metadata(content: str) -> Tuple[str, Dict]:
     """
     Извлекает метаданные карточки из контента.
+    Из материалов используются только tags и category.
 
     Args:
         content: Содержимое Markdown файла
 
     Returns:
-        Tuple[str, str, Dict]: (категория, сложность, frontmatter)
+        Tuple[str, Dict]: (категория, frontmatter)
     """
     frontmatter = extract_frontmatter(content)
 
@@ -231,12 +230,7 @@ def extract_card_metadata(content: str) -> Tuple[str, str, Dict]:
         if match:
             category = match.group(1).lower().replace(' ', '_')
 
-    # Сложность
-    difficulty = frontmatter.get('difficulty', 'medium')
-    if difficulty not in VALID_DIFFICULTIES:
-        difficulty = 'medium'
-
-    return category, difficulty, frontmatter
+    return category, frontmatter
 
 
 # =============================================================================
@@ -359,7 +353,7 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
         return cards
 
     topic_name = Path(file_path).stem
-    category, difficulty, frontmatter = extract_card_metadata(content)
+    category, frontmatter = extract_card_metadata(content)
     deck_name = determine_deck_name(content, frontmatter, category)
 
     # Удаляем frontmatter из контента для парсинга
@@ -392,7 +386,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                             answer=answer,
                             card_type=CardType.CLOZE,
                             cloze_deletions=cloze_deletions,
-                            difficulty=difficulty,
                             tags=frontmatter.get('tags', []),
                             source_note=topic_name,
                             deck_name=deck_name,
@@ -408,7 +401,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                             question=question,
                             answer=answer,
                             card_type=CardType.SINGLE_LINE_BASIC,
-                            difficulty=difficulty,
                             tags=frontmatter.get('tags', []),
                             source_note=topic_name,
                             deck_name=deck_name,
@@ -431,7 +423,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                         question=info1,
                         answer=info2,
                         card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
-                        difficulty=difficulty,
                         tags=frontmatter.get('tags', []),
                         source_note=topic_name,
                         deck_name=deck_name,
@@ -449,7 +440,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                         question=info2,
                         answer=info1,
                         card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
-                        difficulty=difficulty,
                         tags=frontmatter.get('tags', []),
                         source_note=topic_name,
                         deck_name=deck_name,
@@ -482,7 +472,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                     question=question,
                     answer=answer,
                     card_type=CardType.MULTI_LINE_BASIC,
-                    difficulty=difficulty,
                     tags=frontmatter.get('tags', []),
                     source_note=topic_name,
                     deck_name=deck_name,
@@ -509,7 +498,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                     question=info1,
                     answer=info2,
                     card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
-                    difficulty=difficulty,
                     tags=frontmatter.get('tags', []),
                     source_note=topic_name,
                     deck_name=deck_name,
@@ -528,7 +516,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                     question=info2,
                     answer=info1,
                     card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
-                    difficulty=difficulty,
                     tags=frontmatter.get('tags', []),
                     source_note=topic_name,
                     deck_name=deck_name,
@@ -546,7 +533,7 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     for q_text, a_text in legacy_questions:
         code_snippets = re.findall(PATTERNS['code_block'], a_text, re.DOTALL)
 
-        # ВАЖНО: Очистка ответа от тегов колоды и разделителей, 
+        # ВАЖНО: Очистка ответа от тегов колоды и разделителей,
         # которые могли быть захвачены регуляркой до конца файла ($)
         a_text_clean = remove_spaced_repetition_tags(a_text)
 
@@ -563,7 +550,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             answer=a_text_clean,
             card_type=CardType.MULTI_LINE_BASIC,
             code_snippets=code_snippets,
-            difficulty=difficulty,
             tags=tags,
             source_note=topic_name,
             deck_name=deck_name,
@@ -595,7 +581,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                     answer=line,
                     card_type=CardType.CLOZE,
                     cloze_deletions=deletions,
-                    difficulty=difficulty,
                     tags=frontmatter.get('tags', []),
                     source_note=topic_name,
                     deck_name=deck_name,
@@ -625,7 +610,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             answer=clean_content,
             card_type=CardType.MULTI_LINE_BASIC,
             code_snippets=re.findall(PATTERNS['code_block'], clean_content, re.DOTALL),
-            difficulty=difficulty,
             tags=[category],
             source_note=topic_name,
             deck_name=deck_name,
@@ -848,7 +832,7 @@ def generate_obsidian_topic_file(
     frontmatter_lines = [
         "---",
         f"tags: [flashcards]",
-        f"created: {datetime.now().strftime('%Y-%m-%d')}",
+        f"category: {cards[0].category if cards else 'general'}",
         "---",
         "",
         f"# {topic_name}",
@@ -958,8 +942,7 @@ def generate_anki_import_file(
                 if snippet.strip() not in card.answer:
                     back += "<br>" + format_code_for_anki(snippet)
 
-        tags = ' '.join([f"interview/{tag}" for tag in card.tags if tag] +
-                        [f"difficulty/{card.difficulty}"])
+        tags = ' '.join([f"interview/{tag}" for tag in card.tags if tag])
 
         cards_lines.append(f"{front}\t{back}\t{deck_name}\t\t{tags}")
 
