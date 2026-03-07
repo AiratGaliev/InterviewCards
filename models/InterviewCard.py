@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-
 # Константы для валидации
 MAX_QUESTION_LENGTH = 2000
 MAX_ANSWER_LENGTH = 5000
@@ -88,7 +87,36 @@ class InterviewCard:
         """Возвращает отформатированную строку тегов для Obsidian"""
         if not self.tags:
             return "interview/general"
-        return ', '.join([f'interview/{tag}' for tag in self.tags if tag])
+
+        formatted = []
+        for tag in self.tags:
+            if tag:
+                if tag.startswith('interview/'):
+                    formatted.append(tag)
+                else:
+                    formatted.append(f'interview/{tag}')
+
+        return ', '.join(formatted) if formatted else "interview/general"
+
+    def _is_code_in_answer(self, code: str) -> bool:
+        """
+        Проверяет, содержится ли фрагмент кода в ответе.
+
+        Args:
+            code: Фрагмент кода для проверки
+
+        Returns:
+            bool: True если код найден в ответе
+        """
+        if not code or not self.answer:
+            return False
+
+        # Нормализуем код и ответ для сравнения
+        # Убираем лишние пробелы и переносы строк
+        normalized_code = ' '.join(code.split())
+        normalized_answer = ' '.join(self.answer.split())
+
+        return normalized_code in normalized_answer
 
     def to_markdown(self) -> str:
         """
@@ -114,13 +142,20 @@ class InterviewCard:
         # Основной контент
         content_lines = [f"# {self.question}", "", "---", "", self.answer, ""]
 
-        # Добавляем примеры кода
+        # Добавляем примеры кода только если их нет в ответе
         if self.code_snippets:
-            content_lines.append("## Примеры кода")
-            content_lines.append("")
-            for snippet in self.code_snippets:
-                content_lines.append(f"```python\n{snippet}\n```")
+            # Фильтруем сниппеты, которые ещё не содержатся в ответе
+            unique_snippets = [
+                snippet for snippet in self.code_snippets
+                if not self._is_code_in_answer(snippet)
+            ]
+
+            if unique_snippets:
+                content_lines.append("## Примеры кода")
                 content_lines.append("")
+                for snippet in unique_snippets:
+                    content_lines.append(f"```python\n{snippet}\n```")
+                    content_lines.append("")
 
         # Ссылка на исходный материал
         if self.source_note:

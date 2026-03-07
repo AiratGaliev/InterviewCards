@@ -38,14 +38,16 @@ class CardGenerator:
     Инкапсулирует общую логику для Streamlit и CLI версий.
     """
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, use_reverse_cards: bool = True):
         """
         Инициализация генератора.
 
         Args:
             config: Конфигурация приложения
+            use_reverse_cards: Использовать двухсторонние карточки (по умолчанию True)
         """
         self.config = config
+        self.use_reverse_cards = use_reverse_cards
 
     def validate_input_directory(self, input_dir: str) -> Tuple[bool, str]:
         """
@@ -206,8 +208,6 @@ class CardGenerator:
 
             card_id += len(cards)
 
-            # --- ИЗМЕНЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
-
             # 1. Получаем реальный путь к файлу (без дублирования)
             material_file_path = self.copy_material_to_vault(
                 topic_data['path'],
@@ -234,16 +234,18 @@ class CardGenerator:
             for card in cards:
                 card.source_note = link_path
 
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
             cards_path = self.config.get_cards_path(topic_category)
             anki_path = os.path.join(self.config.output, "anki")
-            # materials_path больше не нужен для генерации ссылок, так как мы их уже проставили
 
             # Генерация файлов
             try:
-                # Передаем None в materials_path, чтобы избежать перезаписи ссылок в utils
-                files = generate_all_formats(cards, topic_category, cards_path, anki_path)
+                files = generate_all_formats(
+                    cards,
+                    topic_category,
+                    cards_path,
+                    anki_path,
+                    use_reverse_cards=self.use_reverse_cards
+                )
                 result.output_files.extend(files)
                 all_cards.extend(cards)
                 result.topics_processed += 1

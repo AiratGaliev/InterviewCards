@@ -8,7 +8,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import yaml
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 PATTERNS = {
     'question_answer': r'### Вопрос:\s*(.+?)\nОтвет:\s*(.+?)(?=### Вопрос:|$)',
     'card_format': r'#card\n\n(.+?)\n:::\n(.+?)(?=#card|$)',
+    'card_reverse_format': r'#card-reverse\n\n(.+?)\n:::\n(.+?)(?=#card-reverse|$)',
     'header_content': r'^#\s*(.+?)\n\n---\n\n(.+?)(?=^#\s|#card|$)',
     'code_block': r'```(?:python|javascript|java|sql|json|bash|typescript|go|rust)?\n(.+?)\n```',
     'frontmatter': r'^---\n(.+?)\n---\n',
@@ -179,6 +180,10 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     # Паттерн 2: #card формат (Obsidian_to_Anki)
     questions_v2 = re.findall(PATTERNS['card_format'], content, re.DOTALL)
     all_questions.extend(questions_v2)
+
+    # Паттерн 2b: #card-reverse формат (двухсторонние карточки)
+    questions_v2b = re.findall(PATTERNS['card_reverse_format'], content, re.DOTALL)
+    all_questions.extend(questions_v2b)
 
     # Паттерн 3: Заголовок как вопрос, контент после --- как ответ
     questions_v3 = re.findall(PATTERNS['header_content'], content, re.MULTILINE | re.DOTALL)
@@ -401,6 +406,7 @@ def remove_spaced_repetition_tags(text: str) -> str:
     if not text:
         return ""
 
+    text = re.sub(r'#card-reverse\s*', '', text)
     text = re.sub(r'#card\s*', '', text)
     text = re.sub(r'#interview\s*', '', text)
     text = re.sub(r'#difficulty/\w+\s*', '', text)
@@ -434,8 +440,9 @@ def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
 
 def generate_obsidian_merged_file(
         cards: List[InterviewCard],
-        topic_name: str,  # Изменено: принимаем имя темы, а не категории
-        output_dir: str
+        topic_name: str,
+        output_dir: str,
+        use_reverse_cards: bool = True
 ) -> str:
     """
     Генерирует объединённый файл темы для Obsidian_to_Anki.
@@ -450,11 +457,13 @@ def generate_obsidian_merged_file(
         answer = remove_obsidian_links(answer)
         answer = remove_spaced_repetition_tags(answer)
 
-        content_parts.append(f"#card\n\n{card.question}\n:::\n{answer}\n")
+        card_tag = "#card-reverse" if use_reverse_cards else "#card"
+        content_parts.append(f"{card_tag}\n\n{card.question}\n:::\n{answer}\n")
 
         if card.code_snippets:
             for snippet in card.code_snippets:
-                content_parts.append(f"```python\n{snippet}\n```\n")
+                if snippet.strip() not in answer:
+                    content_parts.append(f"```python\n{snippet}\n```\n")
 
         content_parts.append("---\n")
 
@@ -509,7 +518,8 @@ def generate_anki_import_file(
 
         if card.code_snippets:
             for snippet in card.code_snippets:
-                back += "<br>" + format_code_for_anki(snippet)
+                if snippet.strip() not in card.answer:
+                    back += "<br>" + format_code_for_anki(snippet)
 
         tags = ' '.join([f"interview/{tag}" for tag in card.tags if tag] +
                         [f"difficulty/{card.difficulty}"])
@@ -630,9 +640,10 @@ def validate_markdown_structure(content: str) -> bool:
     """
     has_question = bool(re.search(r'### Вопрос:', content))
     has_card = bool(re.search(r'#card', content))
+    has_card_reverse = bool(re.search(r'#card-reverse', content))
     has_header = bool(re.search(r'^#\s+', content, re.MULTILINE))
 
-    return has_question or has_card or has_header
+    return has_question or has_card or has_card_reverse or has_header
 
 
 def process_cards_batch(
@@ -673,7 +684,8 @@ def generate_all_formats(
         cards: List[InterviewCard],
         category: str,
         cards_output: str,
-        anki_output: str
+        anki_output: str,
+        use_reverse_cards: bool = True
 ) -> List[str]:
     """
     Генерирует все форматы вывода карточек.
@@ -703,7 +715,8 @@ def generate_all_formats(
     merged_file = generate_obsidian_merged_file(
         cards,
         topic_name,
-        os.path.join(cards_output, 'anki_sync')
+        os.path.join(cards_output, 'anki_sync'),
+        use_reverse_cards=use_reverse_cards
     )
     output_files.append(merged_file)
 
