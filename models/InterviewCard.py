@@ -7,9 +7,28 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-# Константы для валидации
-MAX_QUESTION_LENGTH = 2000
-MAX_ANSWER_LENGTH = 5000
+
+def _get_config_limits():
+    """
+    Получает лимиты из конфигурации.
+    Возвращает fallback значения, если конфиг недоступен.
+    """
+    try:
+        from config.Config import get_config
+        config = get_config()
+        return {
+            'max_question_length': config.max_question_length,
+            'max_answer_length': config.max_answer_length,
+        }
+    except Exception:
+        # Fallback значения при отсутствии конфига
+        return {
+            'max_question_length': 2000,
+            'max_answer_length': 5000,
+        }
+
+
+# Допустимые уровни сложности
 VALID_DIFFICULTIES = frozenset(['easy', 'medium', 'hard'])
 
 
@@ -31,6 +50,8 @@ class InterviewCard:
         frontmatter: Метаданные из YAML frontmatter
         created_at: Дата создания
         updated_at: Дата последнего обновления
+        max_question_length: Максимальная длина вопроса (из конфига)
+        max_answer_length: Максимальная длина ответа (из конфига)
     """
     id: int
     topic: str
@@ -44,9 +65,19 @@ class InterviewCard:
     frontmatter: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+    max_question_length: int = field(default=None, repr=False)
+    max_answer_length: int = field(default=None, repr=False)
 
     def __post_init__(self):
-        """Пост-инициализация: нормализация данных"""
+        """Пост-инициализация: нормализация данных и загрузка лимитов"""
+        # Загружаем лимиты из конфига, если не переданы явно
+        if self.max_question_length is None or self.max_answer_length is None:
+            limits = _get_config_limits()
+            if self.max_question_length is None:
+                self.max_question_length = limits['max_question_length']
+            if self.max_answer_length is None:
+                self.max_answer_length = limits['max_answer_length']
+
         # Нормализация сложности
         if self.difficulty not in VALID_DIFFICULTIES:
             self.difficulty = "medium"
@@ -68,13 +99,13 @@ class InterviewCard:
         if not self.question or not self.answer:
             return False
 
-        # Проверка длины полей
-        if len(self.question) > MAX_QUESTION_LENGTH:
-            print(f"⚠️ Вопрос слишком длинный: {len(self.question)} символов")
+        # Проверка длины полей (используем значения из конфига)
+        if len(self.question) > self.max_question_length:
+            print(f"⚠️ Вопрос слишком длинный: {len(self.question)} символов (макс. {self.max_question_length})")
             return False
 
-        if len(self.answer) > MAX_ANSWER_LENGTH:
-            print(f"⚠️ Ответ слишком длинный: {len(self.answer)} символов")
+        if len(self.answer) > self.max_answer_length:
+            print(f"⚠️ Ответ слишком длинный: {len(self.answer)} символов (макс. {self.max_answer_length})")
             return False
 
         return True
@@ -84,13 +115,19 @@ class InterviewCard:
         return bool(self.code_snippets)
 
     def get_formatted_tags(self) -> str:
-        """Возвращает отформатированную строку тегов для Obsidian"""
+        """
+        Возвращает отформатированную строку тегов для Obsidian.
+
+        Проверяет, начинается ли тег уже с префикса 'interview/'
+        во избежание дублирования (interview/interview/python).
+        """
         if not self.tags:
             return "interview/general"
 
         formatted = []
         for tag in self.tags:
             if tag:
+                # Проверяем наличие префикса перед добавлением
                 if tag.startswith('interview/'):
                     formatted.append(tag)
                 else:

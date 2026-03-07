@@ -457,11 +457,14 @@ def generate_obsidian_merged_file(
         answer = remove_obsidian_links(answer)
         answer = remove_spaced_repetition_tags(answer)
 
+        # Используем #card-reverse для двухсторонних карточек
         card_tag = "#card-reverse" if use_reverse_cards else "#card"
         content_parts.append(f"{card_tag}\n\n{card.question}\n:::\n{answer}\n")
 
+        # Добавляем только уникальные сниппеты кода
         if card.code_snippets:
             for snippet in card.code_snippets:
+                # Проверяем, есть ли этот код уже в ответе
                 if snippet.strip() not in answer:
                     content_parts.append(f"```python\n{snippet}\n```\n")
 
@@ -516,8 +519,10 @@ def generate_anki_import_file(
         back = remove_obsidian_links(back)
         back = remove_spaced_repetition_tags(back)
 
+        # Добавляем только уникальные сниппеты кода
         if card.code_snippets:
             for snippet in card.code_snippets:
+                # Проверяем, есть ли код в ответе
                 if snippet.strip() not in card.answer:
                     back += "<br>" + format_code_for_anki(snippet)
 
