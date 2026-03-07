@@ -71,9 +71,6 @@ PATTERNS = {
     'cloze_with_hint': r'==(.+?)==\^\[([^\]]*)\]',
     'cloze_with_sequence': r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]',
     'cloze_generalized': r'==(.+?)==\[\^([ahs]+)\]',
-
-    # Deck теги
-    'deck_tag': r'#flashcards(/[a-zA-Z0-9_/-]+)?',
 }
 
 # Языки программирования для подсветки кода
@@ -121,7 +118,7 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
             frontmatter = extract_frontmatter(content)
 
             # Определяем deck из тегов или структуры
-            deck_name = determine_deck_name(content, frontmatter, category)
+            deck_name = determine_deck_name(frontmatter, category)
 
             topics[topic_name] = {
                 'content': content,
@@ -139,30 +136,39 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
     return topics
 
 
-def determine_deck_name(content: str, frontmatter: Dict, category: str) -> str:
+def determine_deck_name(frontmatter: Dict, category: str) -> str:
     """
-    Определяет имя колоды из тегов или frontmatter.
+    Определяет имя колоды из frontmatter.
+
+    Использует только свойства из frontmatter:
+    - deck: явное указание колоды
+    - tags: теги материала (берём первый тег если это flashcards/...)
+    - category: категория материала
 
     Приоритет:
-    1. Тег #flashcards/path/to/deck в контенте
-    2. Поле deck в frontmatter
+    1. Поле deck в frontmatter
+    2. Первый тег из tags если он начинается с flashcards/
     3. Категория -> flashcards/category
 
     Returns:
         str: Имя колоды (без #, формат: flashcards/...)
     """
-    # Ищем тег #flashcards/... в контенте
-    deck_match = re.search(PATTERNS['deck_tag'], content)
-    if deck_match:
-        deck = deck_match.group(0)[1:]  # Убираем #
-        return deck
-
-    # Проверяем frontmatter
+    # Проверяем явное поле deck в frontmatter
     if 'deck' in frontmatter:
         deck = frontmatter['deck']
-        if not deck.startswith('flashcards'):
-            deck = f"flashcards/{deck}"
-        return deck
+        if isinstance(deck, str):
+            if not deck.startswith('flashcards'):
+                deck = f"flashcards/{deck}"
+            return deck
+
+    # Проверяем tags - ищем тег начинающийся с flashcards/
+    tags = frontmatter.get('tags', [])
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, str) and tag.startswith('flashcards/'):
+                return tag
+    elif isinstance(tags, str) and tags.startswith('flashcards/'):
+        return tags
 
     # По умолчанию - категория
     return f"flashcards/{category}"
@@ -354,7 +360,7 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
 
     topic_name = Path(file_path).stem
     category, frontmatter = extract_card_metadata(content)
-    deck_name = determine_deck_name(content, frontmatter, category)
+    deck_name = determine_deck_name(frontmatter, category)
 
     # Удаляем frontmatter из контента для парсинга
     content_without_fm = re.sub(PATTERNS['frontmatter'], '', content, count=1, flags=re.DOTALL)
@@ -533,9 +539,8 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     for q_text, a_text in legacy_questions:
         code_snippets = re.findall(PATTERNS['code_block'], a_text, re.DOTALL)
 
-        # ВАЖНО: Очистка ответа от тегов колоды и разделителей,
-        # которые могли быть захвачены регуляркой до конца файла ($)
-        a_text_clean = remove_spaced_repetition_tags(a_text)
+        # Очистка ответа от лишних пробелов
+        a_text_clean = a_text.strip()
 
         tags = frontmatter.get('tags', [])
         if isinstance(tags, str):
@@ -599,17 +604,14 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     if not cards:
         logger.info(f"Структурированные вопросы не найдены в {topic_name}, создаём карточку из контента")
 
-        # Очищаем контент от тегов перед созданием fallback карточки
-        clean_content = remove_spaced_repetition_tags(content_without_fm)
-
         card = InterviewCard(
             id=card_id,
             topic=topic_name,
             category=category,
             question=f"Расскажите о: {topic_name}",
-            answer=clean_content,
+            answer=content_without_fm.strip(),
             card_type=CardType.MULTI_LINE_BASIC,
-            code_snippets=re.findall(PATTERNS['code_block'], clean_content, re.DOTALL),
+            code_snippets=re.findall(PATTERNS['code_block'], content_without_fm, re.DOTALL),
             tags=[category],
             source_note=topic_name,
             deck_name=deck_name,
@@ -930,15 +932,22 @@ def generate_anki_import_file(
     category = cards[0].category if cards else "general"
     deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
 
-    header = "#separator:tab\n#html:true\n#deck column:3\n#tags column:5\n"
+    # Заголовок Anki
+    header = "#separator:tab\n#html:true\n#deck column:2\n#tags column:4\n"
 
     cards_lines = []
-    for card in cards:
-        front = format_markdown_to_html(card.question)
-        back = format_markdown_to_html(card.answer)
 
+    for card in cards:
+        front = card.question.replace('\n', '<br>')
+        back = card.answer.replace('\n', '<br>')
+
+        # Форматируем markdown в HTML
+        front = format_markdown_to_html(front)
+        back = format_markdown_to_html(back)
+
+        # Удаляем Obsidian ссылки
+        front = remove_obsidian_links(front)
         back = remove_obsidian_links(back)
-        back = remove_spaced_repetition_tags(back)
 
         # Добавляем уникальные сниппеты кода
         if card.code_snippets:

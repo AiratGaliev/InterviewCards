@@ -190,7 +190,7 @@ def main():
         is_clean_duplicates = st.checkbox("Удалить дубликаты", value=False)
 
         st.markdown("---")
-        st.info(f"Тег колоды: `#flashcards/<category>`")
+        st.info("Deck определяется из frontmatter: `tags` или `category`")
 
         if st.session_state.clicked:
             st.button("🔄 Сбросить", on_click=reset_button, use_container_width=True)

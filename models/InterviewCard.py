@@ -142,11 +142,11 @@ class InterviewCard:
         answer: Текст ответа (back side)
         card_type: Тип карточки (single-line, multi-line, cloze)
         code_snippets: Список фрагментов кода
-        tags: Список тегов из frontmatter материала (включая метки сложности)
+        tags: Список тегов из frontmatter материала
         source_note: Имя исходной заметки для ссылок
         frontmatter: Метаданные из YAML frontmatter (используются только tags и category)
         created_at: Дата создания
-        updated_at: Дата последнего обновления
+        updated_at: Дата последнего обновнения
         scheduling: Данные планирования SR
         deck_name: Имя колоды (например, "flashcards/python")
         cloze_deletions: Список Cloze deletions (для cloze карточек)
@@ -233,24 +233,21 @@ class InterviewCard:
     def get_deck_tag(self) -> str:
         """
         Генерирует тег колоды для Spaced Repetition.
-        Формат: #flashcards/category или #flashcards/subcategory/category
+        Deck определяется на этапе парсинга (determine_deck_name) из frontmatter.
 
         Returns:
-            str: Тег колоды
+            str: Тег колоды в формате #flashcards/...
         """
-        # Формируем путь колоды
+        # deck_name уже содержит правильный путь (flashcards/...)
         deck_path = self.deck_name
 
-        # Если deck_name не начинается с flashcards, добавляем
-        if not deck_path.startswith("flashcards"):
-            if deck_path.startswith("#"):
-                deck_path = deck_path[1:]
-            deck_path = f"flashcards/{deck_path}"
+        # Убираем # если есть
+        if deck_path.startswith("#"):
+            deck_path = deck_path[1:]
 
-        # Добавляем категорию если нужно
-        if self.category and self.category != "general":
-            if not deck_path.endswith(self.category):
-                deck_path = f"{deck_path}/{self.category}"
+        # Добавляем #flashcards префикс если нужно
+        if not deck_path.startswith("flashcards"):
+            deck_path = f"flashcards/{deck_path}"
 
         return f"#{deck_path}"
 

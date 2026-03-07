@@ -189,6 +189,7 @@ class AppConfig:
     def get_deck_tag(self, category: str) -> str:
         """
         Генерирует тег колоды для Spaced Repetition.
+        Используется как fallback если deck не указан в frontmatter.
 
         Args:
             category: Категория карточек
