@@ -546,6 +546,10 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     for q_text, a_text in legacy_questions:
         code_snippets = re.findall(PATTERNS['code_block'], a_text, re.DOTALL)
 
+        # ВАЖНО: Очистка ответа от тегов колоды и разделителей, 
+        # которые могли быть захвачены регуляркой до конца файла ($)
+        a_text_clean = remove_spaced_repetition_tags(a_text)
+
         tags = frontmatter.get('tags', [])
         if isinstance(tags, str):
             tags = [tags]
@@ -556,7 +560,7 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             topic=topic_name,
             category=category,
             question=q_text.strip(),
-            answer=a_text.strip(),
+            answer=a_text_clean,
             card_type=CardType.MULTI_LINE_BASIC,
             code_snippets=code_snippets,
             difficulty=difficulty,
@@ -609,14 +613,18 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     # Если карточек не найдено, создаём карточку из всего контента
     if not cards:
         logger.info(f"Структурированные вопросы не найдены в {topic_name}, создаём карточку из контента")
+
+        # Очищаем контент от тегов перед созданием fallback карточки
+        clean_content = remove_spaced_repetition_tags(content_without_fm)
+
         card = InterviewCard(
             id=card_id,
             topic=topic_name,
             category=category,
             question=f"Расскажите о: {topic_name}",
-            answer=content_without_fm,
+            answer=clean_content,
             card_type=CardType.MULTI_LINE_BASIC,
-            code_snippets=re.findall(PATTERNS['code_block'], content_without_fm, re.DOTALL),
+            code_snippets=re.findall(PATTERNS['code_block'], clean_content, re.DOTALL),
             difficulty=difficulty,
             tags=[category],
             source_note=topic_name,
