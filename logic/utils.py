@@ -15,6 +15,7 @@ import glob
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -786,6 +787,7 @@ def remove_obsidian_links(text: str) -> str:
 def remove_spaced_repetition_tags(text: str) -> str:
     """
     Удаляет теги Spaced Repetition для Anki.
+    Удаляет только теги формата #flashcards/...
 
     Args:
         text: Текст с тегами
@@ -796,8 +798,7 @@ def remove_spaced_repetition_tags(text: str) -> str:
     if not text:
         return ""
 
-    text = re.sub(r'#card-reverse\s*', '', text)
-    text = re.sub(r'#card\s*', '', text)
+    # Удаляем теги Spaced Repetition (Obsidian Spaced Repetition plugin)
     text = re.sub(r'#interview\s*', '', text)
     text = re.sub(r'#flashcards(/[a-zA-Z0-9_/-]+)?\s*', '', text)
     text = re.sub(r'#difficulty/\w+\s*', '', text)
@@ -808,33 +809,6 @@ def remove_spaced_repetition_tags(text: str) -> str:
 # =============================================================================
 # Генерация карточек для Obsidian Spaced Repetition
 # =============================================================================
-
-def generate_obsidian_card(card: InterviewCard, output_dir: str) -> str:
-    """
-    Генерирует карточку для Obsidian Spaced Repetition.
-    Имя файла: {topic}_{id}.md
-
-    Args:
-        card: Карточка
-        output_dir: Папка вывода
-
-    Returns:
-        str: Путь к созданному файлу
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Добавляем ID к имени файла
-    file_name = f"{card.topic}_{card.id}.md"
-    file_path = os.path.join(output_dir, file_name)
-
-    markdown_content = card.to_markdown()
-
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(markdown_content)
-
-    logger.debug(f"Создан файл: {file_path}")
-    return file_path
-
 
 def generate_obsidian_topic_file(
         cards: List[InterviewCard],
@@ -920,16 +894,13 @@ def generate_obsidian_topic_file(
 
     content = '\n'.join(content_parts)
 
-    file_path = os.path.join(output_dir, f"{topic_name}.md")
+    file_path = os.path.join(output_dir, f"{topic_name}_obsidian_cards.md")
 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
     logger.info(f"Создан файл темы: {file_path}")
     return file_path
-
-
-from datetime import datetime
 
 
 # =============================================================================
@@ -958,7 +929,7 @@ def generate_anki_import_file(
     output_dir = output_path if os.path.isdir(output_path) else os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
 
-    file_path = os.path.join(output_dir, f"{topic_name}.txt")
+    file_path = os.path.join(output_dir, f"{topic_name}_anki_cards.txt")
 
     category = cards[0].category if cards else "general"
     deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
@@ -1155,6 +1126,10 @@ def generate_all_formats(
     """
     Генерирует все форматы вывода карточек.
 
+    Генерирует:
+    1. Obsidian Spaced Repetition - один объединённый файл темы (.md)
+    2. Anki Import (.txt файл)
+
     Args:
         cards: Список карточек
         category: Категория
@@ -1179,16 +1154,8 @@ def generate_all_formats(
     os.makedirs(cards_output, exist_ok=True)
     os.makedirs(anki_output, exist_ok=True)
 
-    # 1. Obsidian карточки (индивидуальные файлы)
-    for card in cards:
-        # Пропускаем reverse карточки если отключены
-        if card.is_reverse and not use_reverse_cards:
-            continue
-        file_path = generate_obsidian_card(card, cards_output)
-        output_files.append(file_path)
-
-    # 2. Объединённый файл темы для SR
-    # Фильтруем reverse карточки для объединённого файла
+    # 1. Объединённый файл темы для Obsidian Spaced Repetition
+    # Фильтруем reverse карточки для объединённого файла (они создаются автоматически из ::: и ??)
     main_cards = [c for c in cards if not c.is_reverse] if use_reverse_cards else cards
     if main_cards:
         merged_file = generate_obsidian_topic_file(
@@ -1199,7 +1166,7 @@ def generate_all_formats(
         )
         output_files.append(merged_file)
 
-    # 3. Anki Import файл
+    # 2. Anki Import файл
     anki_file = generate_anki_import_file(
         cards,
         topic_name,

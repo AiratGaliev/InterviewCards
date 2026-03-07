@@ -113,8 +113,6 @@ def display_statistics(files: list, selected_categories: list):
                         lines = [l for l in content.split('\n') if l.strip() and not l.startswith('#')]
                         total_cards += len(lines)
                     else:
-                        total_cards += content.count('#card')
-                        # Также считаем новые форматы SR
                         total_cards += content.count('::') - content.count(':::')  # single-line basic
                         total_cards += content.count(':::')  # bidirectional (создает 2 карточки)
                 except Exception:
@@ -225,8 +223,7 @@ def main():
                             content.count('::') - content.count(':::') +  # single-line basic
                             content.count(':::') * 2 +  # bidirectional (2 карточки)
                             content.count('\n?\n') +  # multi-line basic
-                            content.count('\n??\n') * 2 +  # multi-line bidirectional
-                            content.count('#card')  # legacy формат
+                            content.count('\n??\n') * 2  # multi-line bidirectional
                     )
                     cards_count = max(1, cards_count)
                     st.metric("Карточек в теме", cards_count)
