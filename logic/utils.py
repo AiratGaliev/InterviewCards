@@ -1,3 +1,5 @@
+# logic/utils.py
+
 """
 Основной модуль логики приложения InterviewCards.
 Содержит функции для парсинга Markdown и генерации карточек.
@@ -458,9 +460,61 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
 
     # 2. Парсинг Multi-line карточек (? и ??)
     # Разделяем контент на секции по пустым строкам
-    sections = re.split(r'\n\s*\n', content_without_fm)
+    raw_sections = re.split(r'\n\s*\n', content_without_fm)
 
-    for section in sections:
+    # Объединяем секции, которые принадлежат одной многострочной карточке.
+    # Логика: если секция содержит '?', то следующие за ней секции могут быть частью ответа,
+    # пока не встретится явный разделитель (заголовок, ---, другая карточка).
+    merged_sections = []
+    i = 0
+    while i < len(raw_sections):
+        section = raw_sections[i]
+
+        # Проверяем наличие разделителей многострочных карточек
+        has_multi_sep = ('\n?\n' in section or '\n??\n' in section)
+
+        # Если секция содержит разделитель, проверяем, нужно ли "приклеить" следующие секции
+        if has_multi_sep:
+            current_merged = section
+            j = i + 1
+
+            # Просматриваем следующие секции
+            while j < len(raw_sections):
+                next_section = raw_sections[j]
+                first_line = next_section.strip().split('\n')[0] if next_section.strip() else ""
+
+                # Условия остановки объединения (признаки новой карточки/секции)
+                # 1. Заголовок (#...)
+                # 2. Горизонтальная линия (---)
+                # 3. Начало legacy вопроса (### Вопрос:)
+                # 4. Признаки однострочной карточки (::, :::)
+
+                stop = False
+                if first_line.startswith('#'):
+                    stop = True
+                elif first_line.startswith('---'):
+                    stop = True
+                elif first_line.startswith('### Вопрос:'):
+                    stop = True
+                elif '::' in first_line or ':::' in first_line:
+                    # Если в первой строке следующей секции есть ::, считаем это новой карточкой
+                    stop = True
+
+                if stop:
+                    break
+
+                # Если не остановились, присоединяем секцию (восстанавливая пустую строку)
+                current_merged += "\n\n" + next_section
+                j += 1
+
+            merged_sections.append(current_merged)
+            i = j  # Перепрыгиваем через обработанные секции
+        else:
+            merged_sections.append(section)
+            i += 1
+
+    # Парсинг объединенных секций
+    for section in merged_sections:
         # Multi-line Basic (?)
         if '\n?\n' in section:
             parts = section.split('\n?\n', 1)
@@ -564,6 +618,14 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
         card_id += 1
 
     # 4. Парсинг Cloze карточек (отдельные строки с ==text==)
+    # Фильтруем строки, которые уже были использованы в многострочных карточках, чтобы избежать дублей.
+    # Создаем множество текстов ответов многострочных карточек для проверки.
+    multi_line_answers_text = set()
+    for c in all_cards:
+        if c.card_type in [CardType.MULTI_LINE_BASIC, CardType.MULTI_LINE_BIDIRECTIONAL]:
+            multi_line_answers_text.add(c.answer)
+            multi_line_answers_text.add(c.question)
+
     for line in content_without_fm.split('\n'):
         line = line.strip()
         if not line or line.startswith('#') or line.startswith('```'):
@@ -574,6 +636,16 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             continue
 
         if has_cloze_deletions(line):
+            # Проверяем, не является ли эта строка частью уже созданной многострочной карточки
+            is_part_of_multiline = False
+            for ml_text in multi_line_answers_text:
+                if line in ml_text:
+                    is_part_of_multiline = True
+                    break
+
+            if is_part_of_multiline:
+                continue
+
             deletions = parse_cloze_deletions(line)
             if deletions:
                 scheduling = extract_scheduling_data(line)
@@ -887,8 +959,7 @@ def generate_obsidian_topic_file(
 
         content_parts.append("")
 
-    # Тег колоды в конце файла
-    content_parts.append(f"#{deck_name}")
+    # Тег колоды в конце файла УДАЛЕН, так как теги уже есть в frontmatter
 
     content = '\n'.join(content_parts)
 
