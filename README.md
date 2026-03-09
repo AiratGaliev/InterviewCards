@@ -68,23 +68,7 @@ InterviewCards/
 
 ## ⚙️ Конфигурация
 
-Отредактируйте `config.ini` для настройки путей и параметров:
-
-```ini
-[main]
-categories = python, javascript, java, sql, system_design
-documents = ~/Documents/InterviewCards/
-output = ~/Documents/InterviewCards/output/
-
-[directories-linux]
-obsidian_vault = ~/Documents/ObsidianVault/
-anki_collection_media = ~/.local/share/Anki2/User 1/collection.media/
-
-[limits]
-max_questions_per_deck = 500
-max_question_length = 2000
-max_answer_length = 5000
-```
+Отредактируйте `config.ini` для настройки путей и параметров.
 
 ## 📄 Поддерживаемые форматы карточек
 

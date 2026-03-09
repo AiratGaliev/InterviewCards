@@ -11,10 +11,6 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 
 @dataclass
 class AppConfig:
@@ -63,7 +59,12 @@ class AppConfig:
         self._load_config()
 
     def _load_config(self) -> None:
-        """Загружает конфигурацию из файла config.ini"""
+        """
+        Загружает конфигурацию из файла config.ini.
+        
+        Все настройки приложения читаются только из этого файла.
+        Путь к config.ini можно переопределить через параметр _config_path.
+        """
         self._config.read(self._config_path, encoding='utf-8')
 
         if not self._config.sections():
