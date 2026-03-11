@@ -197,14 +197,185 @@ def should_skip_line_for_single_pass(line: str) -> bool:
 def contains_single_line_card_syntax(section: str) -> bool:
     """
     Проверяет, содержит ли секция однострочную карточку.
+    Игнорирует кодовые блоки.
     """
+    in_code_block = False
+
     for raw_line in section.splitlines():
         line = raw_line.strip()
-        if should_skip_line_for_single_pass(line):
+
+        if line.startswith('```'):
+            in_code_block = not in_code_block
             continue
+
+        if in_code_block or should_skip_line_for_single_pass(line):
+            continue
+
         if detect_card_format(line):
             return True
+
     return False
+
+
+def split_markdown_blocks(content: str) -> List[str]:
+    """
+    Делит Markdown на верхнеуровневые блоки, сохраняя code fences целиком.
+    """
+    blocks: List[str] = []
+    current: List[str] = []
+    in_code_block = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith('```'):
+            current.append(line)
+            in_code_block = not in_code_block
+            continue
+
+        if not in_code_block and not stripped:
+            if current:
+                blocks.append('\n'.join(current).strip())
+                current = []
+            continue
+
+        current.append(line)
+
+    if current:
+        blocks.append('\n'.join(current).strip())
+
+    return [block for block in blocks if block.strip()]
+
+
+def get_first_nonempty_line(text: str) -> str:
+    """
+    Возвращает первую непустую строку блока.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def is_legacy_question_block(block: str) -> bool:
+    """
+    Проверяет, начинается ли блок с legacy-вопроса.
+    """
+    first_line = get_first_nonempty_line(block)
+    return bool(re.match(r'^###\s*Вопрос:', first_line))
+
+
+def is_heading_block(block: str) -> bool:
+    """
+    Проверяет, является ли блок обычным заголовком.
+    """
+    first_line = get_first_nonempty_line(block)
+    return first_line.startswith('#') and not is_legacy_question_block(block)
+
+
+def is_horizontal_rule_block(block: str) -> bool:
+    """
+    Проверяет, является ли блок разделителем ---.
+    """
+    return block.strip() == '---'
+
+
+def split_multiline_block(block: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Ищет внутри блока multi-line карточку:
+    question \\n ? \\n answer
+    или
+    info1 \\n ?? \\n info2
+    """
+    lines = block.splitlines()
+    in_code_block = False
+
+    for idx, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+
+        if stripped.startswith('```'):
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block:
+            continue
+
+        if stripped in {SEPARATORS['multi_line_basic'], SEPARATORS['multi_line_bidirectional']}:
+            question = '\n'.join(lines[:idx]).strip()
+            answer = '\n'.join(lines[idx + 1:]).strip()
+
+            if not question:
+                return None
+
+            return stripped, question, answer
+
+    return None
+
+
+def is_standalone_cloze_block(block: str) -> bool:
+    """
+    Проверяет, является ли блок самостоятельной cloze-карточкой.
+    """
+    stripped = block.strip()
+
+    if not stripped:
+        return False
+
+    if is_horizontal_rule_block(stripped):
+        return False
+
+    if is_heading_block(stripped):
+        return False
+
+    if is_legacy_question_block(stripped):
+        return False
+
+    if contains_single_line_card_syntax(stripped):
+        return False
+
+    if split_multiline_block(stripped):
+        return False
+
+    return has_cloze_deletions(stripped)
+
+
+def is_card_boundary_block(block: str) -> bool:
+    """
+    Проверяет, начинается ли с этого блока новая карточка
+    или структурная граница документа.
+    """
+    stripped = block.strip()
+
+    if not stripped:
+        return True
+
+    if is_horizontal_rule_block(stripped):
+        return True
+
+    if is_heading_block(stripped):
+        return True
+
+    if is_legacy_question_block(stripped):
+        return True
+
+    if contains_single_line_card_syntax(stripped):
+        return True
+
+    if split_multiline_block(stripped):
+        return True
+
+    if is_standalone_cloze_block(stripped):
+        return True
+
+    return False
+
+
+def extract_code_snippets_from_text(text: str) -> List[str]:
+    """
+    Извлекает кодовые блоки из текста ответа.
+    """
+    return re.findall(PATTERNS['code_block'], text, re.DOTALL)
 
 
 def merge_multiline_sections(content: str) -> List[str]:
@@ -489,8 +660,7 @@ def has_cloze_deletions(text: str) -> bool:
 
 def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
     """
-    Парсит карточки Spaced Repetition из Markdown файла.
-    Поддерживает все форматы SR.
+    Парсит карточки из Markdown в исходном порядке документа.
     """
     cards: List[InterviewCard] = []
     card_id = start_id
@@ -508,278 +678,271 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
     tags = normalize_tags(frontmatter.get('tags', []))
 
     content_without_fm = strip_frontmatter(content)
+    blocks = split_markdown_blocks(content_without_fm)
+
     all_cards: List[InterviewCard] = []
     cloze_keys: Set[str] = set()
 
-    # 1. Single-line карточки
-    for raw_line in content_without_fm.splitlines():
-        line = raw_line.strip()
-        if should_skip_line_for_single_pass(line):
+    def add_cloze_card(text: str, scheduling: Optional[SchedulingData] = None) -> None:
+        nonlocal card_id
+
+        cloze_card = create_cloze_card(
+            card_id=card_id,
+            topic_name=topic_name,
+            category=category,
+            text=text,
+            tags=tags,
+            source_note=topic_name,
+            deck_name=deck_name,
+            frontmatter=frontmatter,
+            scheduling=scheduling,
+        )
+
+        if not cloze_card:
+            return
+
+        cloze_key = normalize_text_key(cloze_card.answer)
+        if cloze_key in cloze_keys:
+            return
+
+        all_cards.append(cloze_card)
+        cloze_keys.add(cloze_key)
+        card_id += 1
+
+    i = 0
+    while i < len(blocks):
+        block = blocks[i].strip()
+
+        if not block or is_horizontal_rule_block(block) or is_heading_block(block):
+            i += 1
             continue
 
-        card_type = detect_card_format(line)
-        if not card_type:
-            continue
+        # 1. Legacy
+        if is_legacy_question_block(block):
+            full_block_parts = [block]
+            j = i + 1
 
-        if card_type == CardType.SINGLE_LINE_BASIC:
-            parts = line.split('::', 1)
-            if len(parts) != 2:
-                continue
+            while j < len(blocks) and not is_card_boundary_block(blocks[j]):
+                full_block_parts.append(blocks[j].strip())
+                j += 1
 
-            question = parts[0].strip()
-            answer = remove_scheduling_comment(parts[1].strip())
+            full_block = '\n\n'.join(part for part in full_block_parts if part).strip()
+            legacy_questions = re.findall(
+                PATTERNS['question_answer_v1'],
+                full_block,
+                re.DOTALL | re.MULTILINE
+            )
 
-            if has_cloze_deletions(answer):
-                cloze_card = create_cloze_card(
-                    card_id=card_id,
-                    topic_name=topic_name,
-                    category=category,
-                    text=answer,
-                    tags=tags,
-                    source_note=topic_name,
-                    deck_name=deck_name,
-                    frontmatter=frontmatter,
-                    scheduling=extract_scheduling_data(line),
-                )
-                if cloze_card:
-                    all_cards.append(cloze_card)
-                    cloze_keys.add(normalize_text_key(cloze_card.answer))
+            if legacy_questions:
+                q_text, a_text = legacy_questions[0]
+                answer_clean = remove_scheduling_comment(a_text.strip())
+                scheduling = extract_scheduling_data(full_block)
+
+                if has_cloze_deletions(answer_clean):
+                    add_cloze_card(answer_clean, scheduling)
+                else:
+                    card = InterviewCard(
+                        id=card_id,
+                        topic=topic_name,
+                        category=category,
+                        question=q_text.strip(),
+                        answer=answer_clean,
+                        card_type=CardType.MULTI_LINE_BASIC,
+                        code_snippets=extract_code_snippets_from_text(answer_clean),
+                        tags=tags,
+                        source_note=topic_name,
+                        deck_name=deck_name,
+                        frontmatter=frontmatter,
+                        scheduling=scheduling,
+                    )
+                    all_cards.append(card)
                     card_id += 1
-            else:
-                card = InterviewCard(
+
+            i = j
+            continue
+
+        # 2. Single-line карточки
+        if contains_single_line_card_syntax(block):
+            in_code_block = False
+
+            for raw_line in block.splitlines():
+                line = raw_line.strip()
+
+                if line.startswith('```'):
+                    in_code_block = not in_code_block
+                    continue
+
+                if in_code_block or should_skip_line_for_single_pass(line):
+                    continue
+
+                card_type = detect_card_format(line)
+                if not card_type:
+                    continue
+
+                if card_type == CardType.SINGLE_LINE_BASIC:
+                    question, answer = line.split('::', 1)
+                    question = question.strip()
+                    answer = remove_scheduling_comment(answer.strip())
+                    scheduling = extract_scheduling_data(line)
+
+                    if has_cloze_deletions(answer):
+                        add_cloze_card(answer, scheduling)
+                    else:
+                        card = InterviewCard(
+                            id=card_id,
+                            topic=topic_name,
+                            category=category,
+                            question=question,
+                            answer=answer,
+                            card_type=CardType.SINGLE_LINE_BASIC,
+                            tags=tags,
+                            source_note=topic_name,
+                            deck_name=deck_name,
+                            frontmatter=frontmatter,
+                            scheduling=scheduling,
+                        )
+                        all_cards.append(card)
+                        card_id += 1
+
+                elif card_type == CardType.SINGLE_LINE_BIDIRECTIONAL:
+                    info1, info2 = line.split(':::', 1)
+                    info1 = remove_scheduling_comment(info1.strip())
+                    info2 = remove_scheduling_comment(info2.strip())
+                    scheduling = extract_scheduling_data(line)
+
+                    card1 = InterviewCard(
+                        id=card_id,
+                        topic=topic_name,
+                        category=category,
+                        question=info1,
+                        answer=info2,
+                        card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
+                        tags=tags,
+                        source_note=topic_name,
+                        deck_name=deck_name,
+                        frontmatter=frontmatter,
+                        scheduling=scheduling,
+                        is_reverse=False,
+                    )
+                    all_cards.append(card1)
+                    card_id += 1
+
+                    card2 = InterviewCard(
+                        id=card_id,
+                        topic=topic_name,
+                        category=category,
+                        question=info2,
+                        answer=info1,
+                        card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
+                        tags=tags,
+                        source_note=topic_name,
+                        deck_name=deck_name,
+                        frontmatter=frontmatter,
+                        scheduling=scheduling,
+                        is_reverse=True,
+                        sibling_id=card1.id,
+                    )
+                    all_cards.append(card2)
+                    card_id += 1
+
+            i += 1
+            continue
+
+        # 3. Multi-line карточки
+        multiline_parts = split_multiline_block(block)
+        if multiline_parts:
+            separator, part1, part2 = multiline_parts
+            full_block_parts = [block]
+            merged_answer = part2
+            j = i + 1
+
+            while j < len(blocks) and not is_card_boundary_block(blocks[j]):
+                continuation = blocks[j].strip()
+                full_block_parts.append(continuation)
+                merged_answer = f"{merged_answer}\n\n{continuation}".strip() if merged_answer else continuation
+                j += 1
+
+            full_block = '\n\n'.join(part for part in full_block_parts if part).strip()
+            scheduling = extract_scheduling_data(full_block)
+
+            if separator == SEPARATORS['multi_line_bidirectional']:
+                info1 = remove_scheduling_comment(part1.strip())
+                info2 = remove_scheduling_comment(merged_answer.strip())
+                code_snippets = extract_code_snippets_from_text(f"{info1}\n\n{info2}")
+
+                card1 = InterviewCard(
                     id=card_id,
                     topic=topic_name,
                     category=category,
-                    question=question,
-                    answer=answer,
-                    card_type=CardType.SINGLE_LINE_BASIC,
-                    tags=tags,
-                    source_note=topic_name,
-                    deck_name=deck_name,
-                    frontmatter=frontmatter,
-                    scheduling=extract_scheduling_data(line),
-                )
-                all_cards.append(card)
-                card_id += 1
-
-        elif card_type == CardType.SINGLE_LINE_BIDIRECTIONAL:
-            parts = line.split(':::', 1)
-            if len(parts) != 2:
-                continue
-
-            info1 = remove_scheduling_comment(parts[0].strip())
-            info2 = remove_scheduling_comment(parts[1].strip())
-            scheduling = extract_scheduling_data(line)
-
-            card1 = InterviewCard(
-                id=card_id,
-                topic=topic_name,
-                category=category,
-                question=info1,
-                answer=info2,
-                card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-                is_reverse=False,
-            )
-            all_cards.append(card1)
-            card_id += 1
-
-            card2 = InterviewCard(
-                id=card_id,
-                topic=topic_name,
-                category=category,
-                question=info2,
-                answer=info1,
-                card_type=CardType.SINGLE_LINE_BIDIRECTIONAL,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-                is_reverse=True,
-                sibling_id=card1.id,
-            )
-            all_cards.append(card2)
-            card_id += 1
-
-    # 2. Multi-line карточки и standalone cloze-блоки
-    merged_sections = merge_multiline_sections(content_without_fm)
-
-    for section in merged_sections:
-        stripped_section = section.strip()
-        if not stripped_section or stripped_section == '---':
-            continue
-
-        # Multi-line Bidirectional
-        if '\n??\n' in section:
-            parts = section.split('\n??\n', 1)
-            if len(parts) != 2:
-                continue
-
-            info1 = remove_scheduling_comment(parts[0].strip())
-            info2 = remove_scheduling_comment(parts[1].strip())
-            scheduling = extract_scheduling_data(section)
-
-            card1 = InterviewCard(
-                id=card_id,
-                topic=topic_name,
-                category=category,
-                question=info1,
-                answer=info2,
-                card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-                is_reverse=False,
-            )
-            all_cards.append(card1)
-            card_id += 1
-
-            card2 = InterviewCard(
-                id=card_id,
-                topic=topic_name,
-                category=category,
-                question=info2,
-                answer=info1,
-                card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-                is_reverse=True,
-                sibling_id=card1.id,
-            )
-            all_cards.append(card2)
-            card_id += 1
-            continue
-
-        # Multi-line Basic
-        if '\n?\n' in section:
-            parts = section.split('\n?\n', 1)
-            if len(parts) != 2:
-                continue
-
-            question = remove_scheduling_comment(parts[0].strip())
-            answer = remove_scheduling_comment(parts[1].strip())
-            scheduling = extract_scheduling_data(section)
-
-            if has_cloze_deletions(answer):
-                cloze_card = create_cloze_card(
-                    card_id=card_id,
-                    topic_name=topic_name,
-                    category=category,
-                    text=answer,
+                    question=info1,
+                    answer=info2,
+                    card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
+                    code_snippets=code_snippets,
                     tags=tags,
                     source_note=topic_name,
                     deck_name=deck_name,
                     frontmatter=frontmatter,
                     scheduling=scheduling,
+                    is_reverse=False,
                 )
-                if cloze_card:
-                    all_cards.append(cloze_card)
-                    cloze_keys.add(normalize_text_key(cloze_card.answer))
-                    card_id += 1
-            else:
-                card = InterviewCard(
+                all_cards.append(card1)
+                card_id += 1
+
+                card2 = InterviewCard(
                     id=card_id,
                     topic=topic_name,
                     category=category,
-                    question=question,
-                    answer=answer,
-                    card_type=CardType.MULTI_LINE_BASIC,
+                    question=info2,
+                    answer=info1,
+                    card_type=CardType.MULTI_LINE_BIDIRECTIONAL,
+                    code_snippets=code_snippets,
                     tags=tags,
                     source_note=topic_name,
                     deck_name=deck_name,
                     frontmatter=frontmatter,
                     scheduling=scheduling,
+                    is_reverse=True,
+                    sibling_id=card1.id,
                 )
-                all_cards.append(card)
+                all_cards.append(card2)
                 card_id += 1
+
+            else:
+                question = remove_scheduling_comment(part1.strip())
+                answer = remove_scheduling_comment(merged_answer.strip())
+
+                if has_cloze_deletions(answer):
+                    add_cloze_card(answer, scheduling)
+                else:
+                    card = InterviewCard(
+                        id=card_id,
+                        topic=topic_name,
+                        category=category,
+                        question=question,
+                        answer=answer,
+                        card_type=CardType.MULTI_LINE_BASIC,
+                        code_snippets=extract_code_snippets_from_text(answer),
+                        tags=tags,
+                        source_note=topic_name,
+                        deck_name=deck_name,
+                        frontmatter=frontmatter,
+                        scheduling=scheduling,
+                    )
+                    all_cards.append(card)
+                    card_id += 1
+
+            i = j
             continue
 
-        # Standalone Cloze-блоки
-        if (
-                has_cloze_deletions(stripped_section)
-                and not stripped_section.startswith('#')
-                and not stripped_section.startswith('### Вопрос:')
-                and not contains_single_line_card_syntax(stripped_section)
-        ):
-            scheduling = extract_scheduling_data(stripped_section)
-            cloze_card = create_cloze_card(
-                card_id=card_id,
-                topic_name=topic_name,
-                category=category,
-                text=stripped_section,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-            )
-            if cloze_card:
-                cloze_key = normalize_text_key(cloze_card.answer)
-                if cloze_key not in cloze_keys:
-                    all_cards.append(cloze_card)
-                    cloze_keys.add(cloze_key)
-                    card_id += 1
+        # 4. Standalone Cloze
+        if is_standalone_cloze_block(block):
+            add_cloze_card(block, extract_scheduling_data(block))
+            i += 1
+            continue
 
-    # 3. Legacy-формат
-    legacy_questions = re.findall(
-        PATTERNS['question_answer_v1'],
-        content_without_fm,
-        re.DOTALL | re.MULTILINE
-    )
+        i += 1
 
-    for q_text, a_text in legacy_questions:
-        answer_clean = remove_scheduling_comment(a_text.strip())
-        scheduling = extract_scheduling_data(a_text)
-
-        if has_cloze_deletions(answer_clean):
-            cloze_card = create_cloze_card(
-                card_id=card_id,
-                topic_name=topic_name,
-                category=category,
-                text=answer_clean,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-            )
-            if cloze_card:
-                cloze_key = normalize_text_key(cloze_card.answer)
-                if cloze_key not in cloze_keys:
-                    all_cards.append(cloze_card)
-                    cloze_keys.add(cloze_key)
-                    card_id += 1
-        else:
-            code_snippets = re.findall(PATTERNS['code_block'], answer_clean, re.DOTALL)
-
-            card = InterviewCard(
-                id=card_id,
-                topic=topic_name,
-                category=category,
-                question=q_text.strip(),
-                answer=answer_clean,
-                card_type=CardType.MULTI_LINE_BASIC,
-                code_snippets=code_snippets,
-                tags=tags,
-                source_note=topic_name,
-                deck_name=deck_name,
-                frontmatter=frontmatter,
-                scheduling=scheduling,
-            )
-            all_cards.append(card)
-            card_id += 1
-
-    # 4. Финальная валидация
+    # 5. Финальная валидация
     for card in all_cards:
         try:
             if card.validate():
@@ -787,7 +950,7 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
         except Exception as e:
             logger.warning(f"Карточка {card.id} из {topic_name} не прошла валидацию: {e}")
 
-    # 5. Fallback
+    # 6. Fallback
     if not cards:
         logger.info(f"Структурированные вопросы не найдены в {topic_name}, создаём карточку из контента")
 

@@ -8,6 +8,7 @@ import traceback
 import streamlit as st
 
 from config.Config import get_config
+from logic import parse_cards_from_markdown
 from logic.core import CardGenerator, GenerationResult
 
 
@@ -218,14 +219,7 @@ def main():
 
                     topic_data = topics[selected_topic]
                     # Подсчёт карточек разных форматов
-                    content = topic_data['content']
-                    cards_count = (
-                            content.count('::') - content.count(':::') +  # single-line basic
-                            content.count(':::') * 2 +  # bidirectional (2 карточки)
-                            content.count('\n?\n') +  # multi-line basic
-                            content.count('\n??\n') * 2  # multi-line bidirectional
-                    )
-                    cards_count = max(1, cards_count)
+                    cards_count = len(parse_cards_from_markdown(topic_data['path']))
                     st.metric("Карточек в теме", cards_count)
             else:
                 st.warning("⚠️ Нет Markdown файлов в папке")
