@@ -1,6 +1,7 @@
 ---
 tags: [ flashcards/python, interview ]
 category: python
+source: https://stephenmwangi.com/obsidian-spaced-repetition/
 ---
 
 # Примеры форматов Spaced Repetition
