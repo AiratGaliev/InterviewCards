@@ -55,12 +55,17 @@ class CardGenerator:
 
         return True, f"Найдено тем: {len(topics)}"
 
-    def get_topics_summary(self, input_dir: str) -> List[Dict]:
+    def get_topics_summary(
+            self,
+            input_dir: str,
+            selected_categories: Optional[List[str]] = None,
+    ) -> List[Dict]:
         """
-        Возвращает сводку по темам для отображения в UI.
+        Возвращает сводку по темам с учётом фильтра категорий.
 
         Args:
             input_dir: Путь к директории
+            selected_categories: Фильтр категорий (None = все)
 
         Returns:
             List[Dict]: Список словарей с метаданными тем
@@ -69,6 +74,13 @@ class CardGenerator:
         summary = []
 
         for name, data in topics.items():
+            category = data.get('category', 'general')
+
+            # Фильтрация по категории
+            if (selected_categories
+                    and category not in selected_categories):
+                continue
+
             cards = parse_cards_from_markdown(data['path'])
 
             type_counts = {}
@@ -79,7 +91,7 @@ class CardGenerator:
             summary.append({
                 'name': name,
                 'path': data['path'],
-                'category': data.get('category', 'general'),
+                'category': category,
                 'deck_name': data.get('deck_name', ''),
                 'total_cards': len(cards),
                 'cards_by_type': type_counts,

@@ -286,6 +286,7 @@ def render_sidebar(config, generator: CardGenerator):
 def render_tab_topics(generator: CardGenerator):
     """Отрисовывает вкладку обзора тем и карточек."""
     input_dir = st.session_state['input_dir']
+    selected_categories = st.session_state.get('selected_categories', [])
 
     if not os.path.exists(input_dir):
         st.info(
@@ -304,11 +305,54 @@ def render_tab_topics(generator: CardGenerator):
         )
         return
 
-    # ─── Таблица тем ─────────────────────────────
-    st.markdown(f"### 📚 Темы ({len(topics)})")
+    # ─── Фильтрация по выбранным категориям ──────
+    if selected_categories:
+        filtered_topics = {
+            name: data for name, data in topics.items()
+            if data.get('category', 'general') in selected_categories
+        }
+    else:
+        filtered_topics = topics
 
+    # ─── Заголовок с счётчиком ───────────────────
+    total_count = len(topics)
+    filtered_count = len(filtered_topics)
+
+    if selected_categories and filtered_count < total_count:
+        st.markdown(
+            f"### 📚 Темы ({filtered_count} из {total_count})"
+        )
+        st.caption(
+            f"🏷️ Фильтр: {', '.join(selected_categories)}"
+        )
+    else:
+        st.markdown(f"### 📚 Темы ({total_count})")
+
+    if not filtered_topics:
+        st.warning(
+            f"⚠️ Нет тем для выбранных категорий: "
+            f"{', '.join(selected_categories)}"
+        )
+        st.info(
+            "Измените категории в боковой панели "
+            "или добавьте материалы с нужными категориями"
+        )
+
+        # Показываем какие категории есть в файлах
+        existing_categories = sorted(set(
+            data.get('category', 'general')
+            for data in topics.values()
+        ))
+        if existing_categories:
+            st.caption(
+                f"Доступные категории в файлах: "
+                f"{', '.join(existing_categories)}"
+            )
+        return
+
+    # ─── Таблица тем ─────────────────────────────
     table_data = []
-    for name, data in topics.items():
+    for name, data in filtered_topics.items():
         cards = parse_cards_from_markdown(data['path'])
 
         type_counts = {}
@@ -341,22 +385,50 @@ def render_tab_topics(generator: CardGenerator):
         },
     )
 
+    # ─── Сводная статистика по фильтру ───────────
+    total_cards = sum(row["Карточек"] for row in table_data)
+    categories_in_view = sorted(set(
+        row["Категория"] for row in table_data
+    ))
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Тем", filtered_count)
+    col2.metric("Карточек", total_cards)
+    col3.metric("Категорий", len(categories_in_view))
+
     st.divider()
 
     # ─── Предпросмотр темы ───────────────────────
     st.markdown("### 🔍 Предпросмотр темы")
 
-    topic_names = list(topics.keys())
+    topic_names = list(filtered_topics.keys())
+
+    # Сбрасываем выбор если текущая тема не в фильтре
+    current_preview = st.session_state.get('preview_topic', '')
+    default_idx = 0
+    if current_preview in topic_names:
+        default_idx = topic_names.index(current_preview)
+
     selected_topic = st.selectbox(
         "Выберите тему",
         topic_names,
-        key="preview_topic",
+        index=default_idx,
+        key="preview_topic_select",
     )
 
     if not selected_topic:
         return
 
-    topic_data = topics[selected_topic]
+    topic_data = filtered_topics[selected_topic]
+
+    # Метаданные темы
+    col_cat, col_deck = st.columns(2)
+    col_cat.caption(
+        f"🏷️ Категория: **{topic_data.get('category', 'general')}**"
+    )
+    col_deck.caption(
+        f"📦 Колода: **{topic_data.get('deck_name', '')}**"
+    )
 
     # Содержимое файла
     with st.expander("📄 Markdown содержимое", expanded=False):
@@ -391,8 +463,28 @@ def render_tab_topics(generator: CardGenerator):
     reverse_count = sum(1 for c in cards if c.is_reverse)
     col3.metric("Обратных", reverse_count)
 
+    # Фильтр по типу карточки внутри темы
+    all_types_in_topic = sorted(
+        set(c.card_type for c in cards),
+        key=lambda t: t.value,
+    )
+
+    if len(all_types_in_topic) > 1:
+        type_filter = st.multiselect(
+            "Фильтр по типу карточки",
+            options=all_types_in_topic,
+            default=all_types_in_topic,
+            format_func=lambda t: (
+                f"{CARD_TYPE_EMOJI.get(t, '⚪')} "
+                f"{CARD_TYPE_LABELS.get(t, t.value)}"
+            ),
+            key="card_type_filter",
+        )
+        if type_filter:
+            cards = [c for c in cards if c.card_type in type_filter]
+
     # Список карточек
-    st.markdown("#### Карточки")
+    st.markdown(f"#### Карточки ({len(cards)})")
 
     for i, card in enumerate(cards):
         emoji = CARD_TYPE_EMOJI.get(card.card_type, "⚪")
@@ -457,22 +549,64 @@ def render_tab_generation(config, generator: CardGenerator):
     use_reverse = st.session_state.get('use_reverse_cards', True)
     clean_dupes = st.session_state.get('clean_duplicates', False)
 
+    # ─── Подсчёт тем с учётом фильтра ───────────
+    topics_count = 0
+    filtered_count = 0
+
+    if os.path.exists(input_dir):
+        topics = load_markdown_topics(input_dir)
+        topics_count = len(topics)
+
+        if categories:
+            filtered_count = sum(
+                1 for data in topics.values()
+                if data.get('category', 'general') in categories
+            )
+        else:
+            filtered_count = topics_count
+
     # ─── Параметры ───────────────────────────────
     st.markdown("### 📋 Параметры генерации")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
-    dir_name = (
-        os.path.basename(input_dir.rstrip('/\\'))
-        if input_dir else "—"
-    )
-    col1.metric("📁 Папка", dir_name)
+    if categories and filtered_count < topics_count:
+        col1.metric(
+            "📚 Тем к обработке",
+            f"{filtered_count}/{topics_count}",
+        )
+    else:
+        col1.metric("📚 Тем", topics_count)
+
     col2.metric("🏷️ Категорий", len(categories) or "Все")
 
     fmt_label = EXPORT_FORMATS.get(export_fmt, export_fmt)
-    # Убираем эмодзи для метрики
-    fmt_short = fmt_label.split(' ', 1)[1] if ' ' in fmt_label else fmt_label
+    fmt_short = (
+        fmt_label.split(' ', 1)[1] if ' ' in fmt_label else fmt_label
+    )
     col3.metric("📤 Формат", fmt_short)
+
+    col4.metric(
+        "↔️ Reverse",
+        "Да" if use_reverse else "Нет",
+    )
+
+    # Фильтр-предупреждение
+    if categories and filtered_count == 0 and topics_count > 0:
+        st.error(
+            f"❌ Нет тем для выбранных категорий: "
+            f"{', '.join(categories)}. "
+            f"Измените фильтр в боковой панели."
+        )
+
+        existing_cats = sorted(set(
+            data.get('category', 'general')
+            for data in topics.values()
+        ))
+        if existing_cats:
+            st.info(
+                f"Категории в файлах: {', '.join(existing_cats)}"
+            )
 
     # Опции
     options_parts = []
@@ -480,20 +614,29 @@ def render_tab_generation(config, generator: CardGenerator):
         options_parts.append("↔️ Reverse карточки")
     if clean_dupes:
         options_parts.append("🧹 Дедупликация")
+    if categories:
+        options_parts.append(
+            f"🏷️ {', '.join(categories)}"
+        )
     if options_parts:
         st.caption(f"Опции: {' · '.join(options_parts)}")
-    else:
-        st.caption("Опции: стандартные")
 
     st.divider()
 
     # ─── Кнопка генерации ────────────────────────
-    can_generate = os.path.exists(input_dir)
+    can_generate = (
+            os.path.exists(input_dir) and filtered_count > 0
+    )
 
-    if not can_generate:
+    if not os.path.exists(input_dir):
         st.warning(
             "❌ Папка с материалами не найдена. "
             "Укажите корректный путь в боковой панели."
+        )
+    elif filtered_count == 0:
+        st.warning(
+            "❌ Нет тем для генерации. "
+            "Проверьте фильтр категорий."
         )
 
     generate_clicked = st.button(
