@@ -12,13 +12,13 @@
 """
 
 import glob
+import hashlib
 import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import pandas as pd
 import yaml
 
 from models.InterviewCard import (
@@ -63,7 +63,10 @@ PATTERNS = {
     'cloze_generalized': r'==(.+?)==\[\^([ahs]+)\]',
 }
 
-SUPPORTED_LANGUAGES = ['python', 'javascript', 'java', 'sql', 'json', 'bash', 'typescript', 'go', 'rust']
+SUPPORTED_LANGUAGES = [
+    'python', 'javascript', 'java', 'sql', 'json',
+    'bash', 'typescript', 'go', 'rust',
+]
 
 
 # =============================================================================
@@ -71,9 +74,7 @@ SUPPORTED_LANGUAGES = ['python', 'javascript', 'java', 'sql', 'json', 'bash', 't
 # =============================================================================
 
 def normalize_tags(tags: Any) -> List[str]:
-    """
-    Нормализует теги к списку строк.
-    """
+    """Нормализует теги к списку строк."""
     if tags is None:
         return []
 
@@ -94,9 +95,7 @@ def normalize_tags(tags: Any) -> List[str]:
 
 
 def strip_frontmatter(content: str) -> str:
-    """
-    Удаляет YAML frontmatter из контента.
-    """
+    """Удаляет YAML frontmatter из контента."""
     return re.sub(
         PATTERNS['frontmatter'],
         '',
@@ -107,18 +106,14 @@ def strip_frontmatter(content: str) -> str:
 
 
 def normalize_text_key(text: str) -> str:
-    """
-    Нормализует текст для поиска дублей.
-    """
+    """Нормализует текст для поиска дублей."""
     if not text:
         return ""
     return re.sub(r'\s+', ' ', text).strip()
 
 
 def remove_scheduling_comment(text: str) -> str:
-    """
-    Удаляет комментарий планирования из текста карточки.
-    """
+    """Удаляет комментарий планирования из текста карточки."""
     if not text:
         return ""
     return re.sub(PATTERNS['scheduling_comment'], '', text).strip()
@@ -157,7 +152,6 @@ def build_cloze_question(text: str) -> str:
 def reveal_cloze_text(text: str) -> str:
     """
     Превращает Cloze-разметку в обычный текст с выделением скрытых частей.
-    Полезно для Anki-экспорта.
     """
     if not text:
         return ""
@@ -172,22 +166,17 @@ def reveal_cloze_text(text: str) -> str:
 
 
 def should_skip_line_for_single_pass(line: str) -> bool:
-    """
-    Проверяет, надо ли пропустить строку в однострочном парсинге.
-    """
+    """Проверяет, надо ли пропустить строку в однострочном парсинге."""
     if not line:
         return True
 
     stripped = line.strip()
     if not stripped:
         return True
-
     if stripped.startswith('#'):
         return True
-
     if stripped.startswith('```'):
         return True
-
     if stripped == '---':
         return True
 
@@ -195,10 +184,7 @@ def should_skip_line_for_single_pass(line: str) -> bool:
 
 
 def contains_single_line_card_syntax(section: str) -> bool:
-    """
-    Проверяет, содержит ли секция однострочную карточку.
-    Игнорирует кодовые блоки.
-    """
+    """Проверяет, содержит ли секция однострочную карточку."""
     in_code_block = False
 
     for raw_line in section.splitlines():
@@ -218,9 +204,7 @@ def contains_single_line_card_syntax(section: str) -> bool:
 
 
 def split_markdown_blocks(content: str) -> List[str]:
-    """
-    Делит Markdown на верхнеуровневые блоки, сохраняя code fences целиком.
-    """
+    """Делит Markdown на верхнеуровневые блоки, сохраняя code fences целиком."""
     blocks: List[str] = []
     current: List[str] = []
     in_code_block = False
@@ -248,9 +232,7 @@ def split_markdown_blocks(content: str) -> List[str]:
 
 
 def get_first_nonempty_line(text: str) -> str:
-    """
-    Возвращает первую непустую строку блока.
-    """
+    """Возвращает первую непустую строку блока."""
     for line in text.splitlines():
         stripped = line.strip()
         if stripped:
@@ -259,35 +241,24 @@ def get_first_nonempty_line(text: str) -> str:
 
 
 def is_legacy_question_block(block: str) -> bool:
-    """
-    Проверяет, начинается ли блок с legacy-вопроса.
-    """
+    """Проверяет, начинается ли блок с legacy-вопроса."""
     first_line = get_first_nonempty_line(block)
     return bool(re.match(r'^###\s*Вопрос:', first_line))
 
 
 def is_heading_block(block: str) -> bool:
-    """
-    Проверяет, является ли блок обычным заголовком.
-    """
+    """Проверяет, является ли блок обычным заголовком."""
     first_line = get_first_nonempty_line(block)
     return first_line.startswith('#') and not is_legacy_question_block(block)
 
 
 def is_horizontal_rule_block(block: str) -> bool:
-    """
-    Проверяет, является ли блок разделителем ---.
-    """
+    """Проверяет, является ли блок разделителем ---."""
     return block.strip() == '---'
 
 
 def split_multiline_block(block: str) -> Optional[Tuple[str, str, str]]:
-    """
-    Ищет внутри блока multi-line карточку:
-    question \\n ? \\n answer
-    или
-    info1 \\n ?? \\n info2
-    """
+    """Ищет внутри блока multi-line карточку."""
     lines = block.splitlines()
     in_code_block = False
 
@@ -314,26 +285,19 @@ def split_multiline_block(block: str) -> Optional[Tuple[str, str, str]]:
 
 
 def is_standalone_cloze_block(block: str) -> bool:
-    """
-    Проверяет, является ли блок самостоятельной cloze-карточкой.
-    """
+    """Проверяет, является ли блок самостоятельной cloze-карточкой."""
     stripped = block.strip()
 
     if not stripped:
         return False
-
     if is_horizontal_rule_block(stripped):
         return False
-
     if is_heading_block(stripped):
         return False
-
     if is_legacy_question_block(stripped):
         return False
-
     if contains_single_line_card_syntax(stripped):
         return False
-
     if split_multiline_block(stripped):
         return False
 
@@ -341,30 +305,21 @@ def is_standalone_cloze_block(block: str) -> bool:
 
 
 def is_card_boundary_block(block: str) -> bool:
-    """
-    Проверяет, начинается ли с этого блока новая карточка
-    или структурная граница документа.
-    """
+    """Проверяет, начинается ли с этого блока новая карточка."""
     stripped = block.strip()
 
     if not stripped:
         return True
-
     if is_horizontal_rule_block(stripped):
         return True
-
     if is_heading_block(stripped):
         return True
-
     if is_legacy_question_block(stripped):
         return True
-
     if contains_single_line_card_syntax(stripped):
         return True
-
     if split_multiline_block(stripped):
         return True
-
     if is_standalone_cloze_block(stripped):
         return True
 
@@ -372,16 +327,12 @@ def is_card_boundary_block(block: str) -> bool:
 
 
 def extract_code_snippets_from_text(text: str) -> List[str]:
-    """
-    Извлекает кодовые блоки из текста ответа.
-    """
+    """Извлекает кодовые блоки из текста ответа."""
     return re.findall(PATTERNS['code_block'], text, re.DOTALL)
 
 
 def merge_multiline_sections(content: str) -> List[str]:
-    """
-    Объединяет секции, которые относятся к одной multi-line карточке.
-    """
+    """Объединяет секции, которые относятся к одной multi-line карточке."""
     raw_sections = re.split(r'\n\s*\n', content)
     merged_sections: List[str] = []
 
@@ -438,9 +389,7 @@ def create_cloze_card(
         frontmatter: Dict,
         scheduling: Optional[SchedulingData] = None
 ) -> Optional[InterviewCard]:
-    """
-    Создаёт Cloze-карточку из текста.
-    """
+    """Создаёт Cloze-карточку из текста."""
     cleaned_text = remove_scheduling_comment(text).strip()
     deletions = parse_cloze_deletions(cleaned_text)
 
@@ -471,12 +420,6 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
     """
     Рекурсивно загружает материалы из Markdown файлов,
     определяя категорию по имени папки.
-
-    Args:
-        input_dir: Путь к папке с Markdown файлами
-
-    Returns:
-        Dict[str, Dict]: Словарь тем с метаданными
     """
     topics = {}
 
@@ -519,14 +462,7 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
 
 
 def determine_deck_name(frontmatter: Dict, category: str) -> str:
-    """
-    Определяет имя колоды из frontmatter.
-
-    Приоритет:
-    1. Поле deck
-    2. Первый тег flashcards/...
-    3. flashcards/<category>
-    """
+    """Определяет имя колоды из frontmatter."""
     if 'deck' in frontmatter:
         deck = frontmatter['deck']
         if isinstance(deck, str) and deck.strip():
@@ -544,9 +480,7 @@ def determine_deck_name(frontmatter: Dict, category: str) -> str:
 
 
 def extract_frontmatter(content: str) -> Dict:
-    """
-    Извлекает YAML frontmatter из Markdown контента.
-    """
+    """Извлекает YAML frontmatter из Markdown контента."""
     match = re.match(PATTERNS['frontmatter'], content, re.DOTALL | re.MULTILINE)
     if not match:
         return {}
@@ -560,9 +494,7 @@ def extract_frontmatter(content: str) -> Dict:
 
 
 def extract_scheduling_data(content: str) -> Optional[SchedulingData]:
-    """
-    Извлекает данные планирования из HTML комментария.
-    """
+    """Извлекает данные планирования из HTML комментария."""
     match = re.search(PATTERNS['scheduling_comment'], content)
     if match:
         return SchedulingData(
@@ -574,9 +506,7 @@ def extract_scheduling_data(content: str) -> Optional[SchedulingData]:
 
 
 def extract_card_metadata(content: str) -> Tuple[str, Dict]:
-    """
-    Извлекает метаданные карточки из контента.
-    """
+    """Извлекает метаданные карточки из контента."""
     frontmatter = extract_frontmatter(content)
 
     category = frontmatter.get('category', 'general')
@@ -593,9 +523,7 @@ def extract_card_metadata(content: str) -> Tuple[str, Dict]:
 # =============================================================================
 
 def detect_card_format(line: str) -> Optional[CardType]:
-    """
-    Определяет тип карточки по формату строки.
-    """
+    """Определяет тип карточки по формату строки."""
     line = line.strip()
 
     if re.match(PATTERNS['single_line_bidirectional'], line):
@@ -608,9 +536,7 @@ def detect_card_format(line: str) -> Optional[CardType]:
 
 
 def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
-    """
-    Парсит cloze deletions из текста.
-    """
+    """Парсит cloze deletions из текста."""
     deletions: List[ClozeDeletion] = []
 
     for match in re.finditer(r'==(.+?)==\[\^([ahs]+)\]', text):
@@ -652,16 +578,12 @@ def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
 
 
 def has_cloze_deletions(text: str) -> bool:
-    """
-    Проверяет наличие cloze deletions в тексте.
-    """
+    """Проверяет наличие cloze deletions в тексте."""
     return bool(re.search(r'==.+?==', text, re.DOTALL))
 
 
 def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
-    """
-    Парсит карточки из Markdown в исходном порядке документа.
-    """
+    """Парсит карточки из Markdown в исходном порядке документа."""
     cards: List[InterviewCard] = []
     card_id = start_id
 
@@ -859,16 +781,23 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             while j < len(blocks) and not is_card_boundary_block(blocks[j]):
                 continuation = blocks[j].strip()
                 full_block_parts.append(continuation)
-                merged_answer = f"{merged_answer}\n\n{continuation}".strip() if merged_answer else continuation
+                merged_answer = (
+                    f"{merged_answer}\n\n{continuation}".strip()
+                    if merged_answer else continuation
+                )
                 j += 1
 
-            full_block = '\n\n'.join(part for part in full_block_parts if part).strip()
+            full_block = '\n\n'.join(
+                part for part in full_block_parts if part
+            ).strip()
             scheduling = extract_scheduling_data(full_block)
 
             if separator == SEPARATORS['multi_line_bidirectional']:
                 info1 = remove_scheduling_comment(part1.strip())
                 info2 = remove_scheduling_comment(merged_answer.strip())
-                code_snippets = extract_code_snippets_from_text(f"{info1}\n\n{info2}")
+                code_snippets = extract_code_snippets_from_text(
+                    f"{info1}\n\n{info2}"
+                )
 
                 card1 = InterviewCard(
                     id=card_id,
@@ -948,11 +877,17 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             if card.validate():
                 cards.append(card)
         except Exception as e:
-            logger.warning(f"Карточка {card.id} из {topic_name} не прошла валидацию: {e}")
+            logger.warning(
+                f"Карточка {card.id} из {topic_name} "
+                f"не прошла валидацию: {e}"
+            )
 
     # 6. Fallback
     if not cards:
-        logger.info(f"Структурированные вопросы не найдены в {topic_name}, создаём карточку из контента")
+        logger.info(
+            f"Структурированные вопросы не найдены в {topic_name}, "
+            f"создаём карточку из контента"
+        )
 
         fallback_answer = content_without_fm.strip()
         fallback_card = InterviewCard(
@@ -962,7 +897,9 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             question=f"Расскажите о: {topic_name}",
             answer=fallback_answer,
             card_type=CardType.MULTI_LINE_BASIC,
-            code_snippets=re.findall(PATTERNS['code_block'], content_without_fm, re.DOTALL),
+            code_snippets=re.findall(
+                PATTERNS['code_block'], content_without_fm, re.DOTALL
+            ),
             tags=tags or [category],
             source_note=topic_name,
             deck_name=deck_name,
@@ -972,16 +909,17 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             if fallback_card.validate():
                 cards.append(fallback_card)
         except Exception as e:
-            logger.warning(f"Fallback-карточка для {topic_name} не прошла валидацию: {e}")
+            logger.warning(
+                f"Fallback-карточка для {topic_name} "
+                f"не прошла валидацию: {e}"
+            )
 
     logger.info(f"Парсинг {topic_name}: найдено {len(cards)} карточек")
     return cards
 
 
 def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
-    """
-    Парсит все Markdown файлы в директории.
-    """
+    """Парсит все Markdown файлы в директории."""
     all_cards: List[InterviewCard] = []
     card_id = 1
 
@@ -1005,51 +943,81 @@ def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
 # =============================================================================
 
 def clean_text(text: str) -> str:
-    """
-    Очищает текст от лишних пробелов и переносов строк.
-    """
+    """Очищает текст от лишних пробелов и переносов строк."""
     if not text:
         return ""
-
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
 def escape_html(text: str) -> str:
-    """
-    Экранирует HTML-символы для Anki.
-    """
+    """Экранирует HTML-символы для Anki."""
     if not text:
         return ""
-
     text = text.replace('&', '&amp;')
     text = text.replace('<', '&lt;')
     text = text.replace('>', '&gt;')
+    text = text.replace('"', '&quot;')
+    return text
+
+
+def escape_for_tsv(text: str) -> str:
+    """
+    Экранирует текст для безопасного включения в TSV-формат.
+    Заменяет табуляции и управляющие символы.
+    """
+    if not text:
+        return ""
+    text = text.replace('\t', '    ')
+    # Убираем символы, которые могут сломать TSV
+    text = text.replace('\r\n', '\n')
+    text = text.replace('\r', '\n')
     return text
 
 
 def format_code_for_anki(code: str, language: str = 'python') -> str:
     """
     Форматирует код для отображения в Anki.
+    Улучшенная версия с лучшей стилизацией.
     """
     if not code:
         return ""
 
-    code = escape_html(code)
+    code = escape_html(code.strip())
     code = code.replace('\n', '<br>')
     code = code.replace('  ', '&nbsp;&nbsp;')
 
+    lang_colors = {
+        'python': '#306998',
+        'javascript': '#f7df1e',
+        'typescript': '#3178c6',
+        'java': '#ed8b00',
+        'sql': '#e38c00',
+        'bash': '#4eaa25',
+        'json': '#292929',
+        'go': '#00add8',
+        'rust': '#ce412b',
+    }
+    accent_color = lang_colors.get(language, '#666')
+
     return (
-        f'<pre style="background:#f4f4f4;padding:10px;'
-        f'border-radius:5px;overflow-x:auto;">'
-        f'<code class="language-{language}">{code}</code></pre>'
+        f'<div style="margin:8px 0;">'
+        f'<div style="background:{accent_color};color:#fff;'
+        f'padding:2px 8px;border-radius:4px 4px 0 0;'
+        f'font-size:0.75em;display:inline-block;">{language}</div>'
+        f'<pre style="background:#1e1e1e;color:#d4d4d4;'
+        f'padding:12px;border-radius:0 4px 4px 4px;'
+        f'overflow-x:auto;margin:0;font-size:0.9em;'
+        f'font-family:\'Fira Code\',\'Courier New\',monospace;">'
+        f'<code>{code}</code></pre></div>'
     )
 
 
 def format_markdown_to_html(text: str) -> str:
     """
-    Конвертирует Markdown в HTML для Anki.
+    Конвертирует Markdown в HTML (базовая версия).
+    Для Anki экспорта лучше использовать format_markdown_to_anki_html().
     """
     if not text:
         return ""
@@ -1058,46 +1026,274 @@ def format_markdown_to_html(text: str) -> str:
     text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text)
     text = re.sub(
         r'`([^`]+)`',
-        r'<code style="background:#f0f0f0;padding:2px 5px;border-radius:3px;">\1</code>',
+        r'<code style="background:#f0f0f0;padding:2px 5px;'
+        r'border-radius:3px;">\1</code>',
         text
     )
     text = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
     text = re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*[-*]\s+(.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
+    text = re.sub(
+        r'^\s*[-*]\s+(.+)$', r'<li>\1</li>', text, flags=re.MULTILINE
+    )
     text = re.sub(r'(<li>.+</li>\n?)+', r'<ul>\g<0></ul>', text)
-    text = re.sub(r'^\s*\d+\.\s+(.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
+    text = re.sub(
+        r'^\s*\d+\.\s+(.+)$', r'<li>\1</li>', text, flags=re.MULTILINE
+    )
     text = text.replace('\n\n', '<br><br>')
     text = text.replace('\n', '<br>')
 
     return text
 
 
-def remove_obsidian_links(text: str) -> str:
+def format_markdown_to_anki_html(text: str) -> str:
     """
-    Удаляет ссылки Obsidian для чистого Anki экспорта.
+    Конвертирует Markdown в HTML, оптимизированный для Anki.
+
+    Улучшения по сравнению с format_markdown_to_html:
+    - Защита кодовых блоков от обработки
+    - Защита inline code
+    - Обработка blockquote
+    - Корректная обработка вложенных списков
+    - Горизонтальные разделители
     """
     if not text:
         return ""
 
+    # 1. Защищаем fenced code blocks
+    code_blocks: List[Tuple[str, str]] = []
+
+    def _save_code_block(m):
+        lang = m.group(1) or 'text'
+        code = m.group(2)
+        idx = len(code_blocks)
+        code_blocks.append((lang, code))
+        return f"\x00CODEBLOCK{idx}\x00"
+
+    result = re.sub(
+        r'```(\w*)\r?\n(.*?)\r?\n```',
+        _save_code_block,
+        text,
+        flags=re.DOTALL
+    )
+
+    # 2. Защищаем inline code
+    inline_codes: List[str] = []
+
+    def _save_inline(m):
+        idx = len(inline_codes)
+        inline_codes.append(m.group(1))
+        return f"\x00INLINE{idx}\x00"
+
+    result = re.sub(r'`([^`]+)`', _save_inline, result)
+
+    # 3. Markdown-форматирование
+    # Bold
+    result = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', result)
+    # Italic (не захватываем **)
+    result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'<i>\1</i>', result)
+
+    # Заголовки
+    result = re.sub(
+        r'^####\s+(.+)$', r'<h4>\1</h4>', result, flags=re.MULTILINE
+    )
+    result = re.sub(
+        r'^###\s+(.+)$', r'<h3>\1</h3>', result, flags=re.MULTILINE
+    )
+    result = re.sub(
+        r'^##\s+(.+)$', r'<h2>\1</h2>', result, flags=re.MULTILINE
+    )
+    result = re.sub(
+        r'^#\s+(.+)$', r'<h1>\1</h1>', result, flags=re.MULTILINE
+    )
+
+    # Горизонтальный разделитель
+    result = re.sub(r'^---+\s*$', '<hr>', result, flags=re.MULTILINE)
+
+    # Blockquote
+    bq_lines = result.split('\n')
+    processed = []
+    in_bq = False
+    for line in bq_lines:
+        if line.strip().startswith('>'):
+            if not in_bq:
+                processed.append(
+                    '<blockquote style="border-left:3px solid #ccc;'
+                    'padding-left:10px;color:#555;margin:8px 0;">'
+                )
+                in_bq = True
+            content = re.sub(r'^>\s*', '', line.strip())
+            processed.append(content)
+        else:
+            if in_bq:
+                processed.append('</blockquote>')
+                in_bq = False
+            processed.append(line)
+    if in_bq:
+        processed.append('</blockquote>')
+    result = '\n'.join(processed)
+
+    # Маркированные списки
+    result = re.sub(
+        r'^\s*[-*]\s+(.+)$', r'<li>\1</li>', result, flags=re.MULTILINE
+    )
+    result = re.sub(
+        r'((?:<li>.*?</li>\s*)+)',
+        lambda m: '<ul>' + m.group(0).strip() + '</ul>',
+        result
+    )
+
+    # Нумерованные списки
+    result = re.sub(
+        r'^\s*\d+\.\s+(.+)$', r'<li>\1</li>', result, flags=re.MULTILINE
+    )
+
+    # Переносы строк
+    result = result.replace('\n\n', '<br><br>')
+    result = result.replace('\n', '<br>')
+
+    # Убираем множественные <br>
+    result = re.sub(r'(<br>){3,}', '<br><br>', result)
+
+    # 4. Восстанавливаем inline code
+    for idx, code in enumerate(inline_codes):
+        escaped = escape_html(code)
+        styled = (
+            f'<code style="background:#999;padding:2px 6px;'
+            f'border-radius:4px;font-family:\'Courier New\',monospace;'
+            f'font-size:0.9em;">{escaped}</code>'
+        )
+        result = result.replace(f"\x00INLINE{idx}\x00", styled)
+
+    # 5. Восстанавливаем code blocks
+    for idx, (lang, code) in enumerate(code_blocks):
+        formatted = format_code_for_anki(code, lang)
+        result = result.replace(f"\x00CODEBLOCK{idx}\x00", formatted)
+
+    return result
+
+
+def remove_obsidian_links(text: str) -> str:
+    """Удаляет ссылки Obsidian для чистого Anki экспорта."""
+    if not text:
+        return ""
     text = re.sub(r'\[\[.*?\|(.+?)\]\]', r'\1', text)
     text = re.sub(r'\[\[(.+?)\]\]', r'\1', text)
-
     return text
 
 
 def remove_spaced_repetition_tags(text: str) -> str:
-    """
-    Удаляет теги Spaced Repetition для Anki.
-    """
+    """Удаляет теги Spaced Repetition для Anki."""
     if not text:
         return ""
-
     text = re.sub(r'#interview\s*', '', text)
     text = re.sub(r'#flashcards(/[a-zA-Z0-9_/-]+)?\s*', '', text)
     text = re.sub(r'#difficulty/\w+\s*', '', text)
-
     return text.strip()
+
+
+# =============================================================================
+# Конвертация Cloze для Anki
+# =============================================================================
+
+def convert_cloze_to_anki_format(text: str) -> str:
+    """
+    Конвертирует Obsidian Spaced Repetition cloze-формат
+    в нативный формат Anki.
+
+    Преобразования:
+      ==text==^[hint][^N]  →  {{cN::text::hint}}
+      ==text==^[hint]      →  {{cN::text::hint}}
+      ==text==[^actions]   →  {{cN::text}}
+      ==text==             →  {{cN::text}}
+
+    Номера cloze (cN) присваиваются автоматически.
+    Карточки с одинаковым [^N] получают одинаковый номер.
+    """
+    if not text or '==' not in text:
+        return text
+
+    result = text
+    cloze_counter = [0]
+    seq_to_num: Dict[int, int] = {}
+
+    # Защищаем кодовые блоки от конвертации
+    code_blocks: List[str] = []
+
+    def _save_code(m):
+        idx = len(code_blocks)
+        code_blocks.append(m.group(0))
+        return f"\x02CODEPROTECT{idx}\x02"
+
+    result = re.sub(r'```.*?```', _save_code, result, flags=re.DOTALL)
+    result = re.sub(r'`[^`]+`', _save_code, result)
+
+    # 1. ==text==^[hint][^seq] → {{cN::text::hint}}
+    def _replace_seq_hint(m):
+        content = m.group(1)
+        hint = m.group(2)
+        seq = int(m.group(3))
+        if seq not in seq_to_num:
+            cloze_counter[0] += 1
+            seq_to_num[seq] = cloze_counter[0]
+        num = seq_to_num[seq]
+        if hint and hint.strip():
+            return f"{{{{c{num}::{content}::{hint.strip()}}}}}"
+        return f"{{{{c{num}::{content}}}}}"
+
+    result = re.sub(
+        r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]', _replace_seq_hint, result
+    )
+
+    # 2. ==text==^[hint] → {{cN::text::hint}}
+    def _replace_hint(m):
+        content = m.group(1)
+        hint = m.group(2)
+        cloze_counter[0] += 1
+        if hint and hint.strip():
+            return f"{{{{c{cloze_counter[0]}::{content}::{hint.strip()}}}}}"
+        return f"{{{{c{cloze_counter[0]}::{content}}}}}"
+
+    result = re.sub(
+        r'==(.+?)==\^\[([^\]]*)\](?!\[\^)', _replace_hint, result
+    )
+
+    # 3. ==text==[^actions] → {{cN::text}}
+    def _replace_actions(m):
+        cloze_counter[0] += 1
+        return f"{{{{c{cloze_counter[0]}::{m.group(1)}}}}}"
+
+    result = re.sub(
+        r'==(.+?)==\[\^([ahs]+)\]', _replace_actions, result
+    )
+
+    # 4. ==text== → {{cN::text}}
+    def _replace_simple(m):
+        cloze_counter[0] += 1
+        return f"{{{{c{cloze_counter[0]}::{m.group(1)}}}}}"
+
+    result = re.sub(r'==(.+?)==', _replace_simple, result)
+
+    # Восстанавливаем кодовые блоки
+    for idx, block in enumerate(code_blocks):
+        result = result.replace(f"\x02CODEPROTECT{idx}\x02", block)
+
+    return result
+
+
+def generate_card_guid(card: InterviewCard) -> str:
+    """
+    Генерирует стабильный GUID для карточки Anki.
+
+    Основан на содержимом карточки, поэтому при повторном
+    экспорте одинаковых карточек GUID сохраняется.
+    Это позволяет Anki распознавать дубликаты при импорте.
+    """
+    key = (
+        f"{card.topic}|{card.question[:200]}|"
+        f"{card.card_type.value}|{card.is_reverse}"
+    )
+    return hashlib.md5(key.encode('utf-8')).hexdigest()[:12]
 
 
 # =============================================================================
@@ -1110,9 +1306,7 @@ def generate_obsidian_topic_file(
         output_dir: str,
         deck_name: str = None
 ) -> str:
-    """
-    Генерирует объединённый файл темы для Obsidian Spaced Repetition.
-    """
+    """Генерирует объединённый файл темы для Obsidian Spaced Repetition."""
     os.makedirs(output_dir, exist_ok=True)
 
     if not deck_name and cards:
@@ -1198,69 +1392,275 @@ def generate_obsidian_topic_file(
 
 
 # =============================================================================
-# Генерация карточек для Anki
+# Генерация карточек для Anki (УЛУЧШЕННАЯ ВЕРСИЯ)
 # =============================================================================
+
+def _clean_text_for_anki(text: str) -> str:
+    """
+    Очищает текст от Obsidian-артефактов для Anki.
+    Применяет все необходимые очистки перед HTML-конвертацией.
+    """
+    if not text:
+        return ""
+    text = remove_scheduling_comment(text)
+    text = remove_obsidian_links(text)
+    text = remove_spaced_repetition_tags(text)
+    return text.strip()
+
+
+def _build_source_html(card: InterviewCard) -> str:
+    """
+    Создаёт HTML-блок ссылки на исходный материал.
+    Добавляется в конец back-стороны карточки.
+    """
+    if not card.source_note:
+        return ""
+    source_name = escape_html(card.source_note)
+    return (
+        f'<hr style="border:none;border-top:1px solid #ddd;margin:12px 0 6px 0;">'
+        f'<div style="color:#999;font-size:0.8em;">📎 {source_name}</div>'
+    )
+
+
+def _format_tags_for_anki(card: InterviewCard) -> str:
+    """
+    Форматирует теги карточки для Anki.
+    Anki-теги не используют #, разделяются пробелами.
+    """
+    tag_values = normalize_tags(card.tags)
+    result = []
+    for tag in tag_values:
+        # Убираем #, заменяем пробелы на _
+        clean = tag.lstrip('#').strip().replace(' ', '_')
+        if clean:
+            result.append(clean)
+    # Добавляем категорию как тег
+    if card.category and card.category not in result:
+        result.append(card.category)
+    return ' '.join(result)
+
+
+def _write_anki_basic_file(
+        cards: List[InterviewCard],
+        file_path: str,
+        deck_name: str,
+) -> None:
+    """
+    Записывает карточки типа Basic в файл импорта Anki.
+
+    Формат файла:
+      #separator:tab
+      #html:true
+      #notetype:Basic
+      #deck:DeckName
+      #tags column:3
+      Front<TAB>Back<TAB>Tags
+    """
+    header_lines = [
+        "#separator:tab",
+        "#html:true",
+        "#notetype:Basic",
+        f"#deck:{deck_name}",
+        "#tags column:3",
+    ]
+
+    card_lines: List[str] = []
+
+    for card in cards:
+        # Очистка сырого текста
+        front_raw = _clean_text_for_anki(card.question or "")
+        back_raw = _clean_text_for_anki(card.answer or "")
+
+        # Конвертация в HTML
+        front = format_markdown_to_anki_html(front_raw)
+        back = format_markdown_to_anki_html(back_raw)
+
+        # Дополнительные code snippets (если не встроены в ответ)
+        if card.code_snippets:
+            for snippet in card.code_snippets:
+                normalized_snippet = ' '.join(snippet.split())
+                normalized_back = ' '.join(back_raw.split())
+                if normalized_snippet not in normalized_back:
+                    back += format_code_for_anki(snippet)
+
+        # Ссылка на источник
+        back += _build_source_html(card)
+
+        # Экранирование для TSV
+        front = escape_for_tsv(front)
+        back = escape_for_tsv(back)
+
+        # Теги
+        tags = _format_tags_for_anki(card)
+
+        card_lines.append(f"{front}\t{back}\t{tags}")
+
+    content = '\n'.join(header_lines) + '\n' + '\n'.join(card_lines) + '\n'
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def _write_anki_cloze_file(
+        cards: List[InterviewCard],
+        file_path: str,
+        deck_name: str,
+) -> None:
+    """
+    Записывает карточки типа Cloze в файл импорта Anki.
+
+    Конвертирует Obsidian ==text== в нативный Anki {{c1::text}}.
+
+    Формат файла:
+      #separator:tab
+      #html:true
+      #notetype:Cloze
+      #deck:DeckName
+      #tags column:3
+      Text<TAB>BackExtra<TAB>Tags
+    """
+    header_lines = [
+        "#separator:tab",
+        "#html:true",
+        "#notetype:Cloze",
+        f"#deck:{deck_name}",
+        "#tags column:3",
+    ]
+
+    card_lines: List[str] = []
+
+    for card in cards:
+        cloze_raw = card.answer or ""
+
+        # Очистка
+        cloze_raw = remove_scheduling_comment(cloze_raw)
+        cloze_raw = remove_obsidian_links(cloze_raw)
+        cloze_raw = remove_spaced_repetition_tags(cloze_raw)
+
+        # Конвертация ==text== → {{c1::text}}
+        anki_cloze = convert_cloze_to_anki_format(cloze_raw)
+
+        # Защищаем cloze-маркеры от HTML-конвертации
+        cloze_markers: List[str] = []
+
+        def _save_cloze_marker(m):
+            idx = len(cloze_markers)
+            cloze_markers.append(m.group(0))
+            return f"\x01ANKI_CLOZE_{idx}\x01"
+
+        protected = re.sub(
+            r'\{\{c\d+::.*?\}\}',
+            _save_cloze_marker,
+            anki_cloze,
+            flags=re.DOTALL
+        )
+
+        # Конвертация в HTML
+        html_text = format_markdown_to_anki_html(protected)
+
+        # Восстанавливаем cloze-маркеры
+        for idx, marker in enumerate(cloze_markers):
+            html_text = html_text.replace(
+                f"\x01ANKI_CLOZE_{idx}\x01", marker
+            )
+
+        # Back Extra: ссылка на источник
+        back_extra = _build_source_html(card)
+
+        # Экранирование для TSV
+        html_text = escape_for_tsv(html_text)
+        back_extra = escape_for_tsv(back_extra)
+
+        # Теги
+        tags = _format_tags_for_anki(card)
+
+        card_lines.append(f"{html_text}\t{back_extra}\t{tags}")
+
+    content = '\n'.join(header_lines) + '\n' + '\n'.join(card_lines) + '\n'
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
 
 def generate_anki_import_file(
         cards: List[InterviewCard],
         topic_name: str,
         output_path: str,
         deck_prefix: str = "Interview"
-) -> str:
+) -> List[str]:
     """
-    Генерирует файл для импорта в Anki.
+    Генерирует файл(ы) для импорта в Anki.
+
+    Улучшения:
+    - Раздельные файлы для Basic и Cloze note types
+    - Нативный Anki cloze формат {{c1::text::hint}}
+    - Улучшенное HTML-форматирование с защитой кодовых блоков
+    - Ссылки на исходные материалы
+    - Корректные заголовки #deck и #tags column
+    - Чистка артефактов Obsidian (ссылки, теги SR)
+
+    Args:
+        cards: Список карточек
+        topic_name: Имя темы
+        output_path: Путь к выходному файлу или директории
+        deck_prefix: Префикс имени колоды
+
+    Returns:
+        List[str]: Список путей к созданным файлам
     """
-    output_dir = output_path if os.path.isdir(output_path) else os.path.dirname(output_path)
+    output_dir = (
+        output_path
+        if os.path.isdir(output_path)
+        else os.path.dirname(output_path)
+    )
     os.makedirs(output_dir, exist_ok=True)
 
-    file_path = os.path.join(output_dir, f"{topic_name}_anki_cards.txt")
+    created_files: List[str] = []
 
-    if cards and cards[0].deck_name:
+    if not cards:
+        return created_files
+
+    # Определяем имя колоды
+    if cards[0].deck_name:
         deck_name = cards[0].deck_name.replace('/', '::')
     else:
-        category = cards[0].category if cards else "general"
+        category = cards[0].category
         deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
 
-    header = "#separator:tab\n#html:true\n#deck column:2\n#tags column:4\n"
-    cards_lines: List[str] = []
+    # Гарантируем что flashcards → Flashcards::...
+    if deck_name.startswith('flashcards'):
+        deck_name = deck_name.replace('flashcards', 'Interview Cards', 1)
 
-    for card in cards:
-        front_raw = card.question or ""
-        back_raw = card.answer or ""
+    # Разделяем карточки по типам
+    basic_cards = [c for c in cards if c.card_type != CardType.CLOZE]
+    cloze_cards = [c for c in cards if c.card_type == CardType.CLOZE]
 
-        if card.card_type == CardType.CLOZE:
-            front_raw = front_raw or build_cloze_question(back_raw)
-            back_raw = reveal_cloze_text(back_raw)
+    # Генерация файла Basic
+    if basic_cards:
+        basic_path = os.path.join(
+            output_dir, f"{topic_name}_anki_basic.txt"
+        )
+        _write_anki_basic_file(basic_cards, basic_path, deck_name)
+        created_files.append(basic_path)
+        logger.info(
+            f"Создан Anki Basic: {basic_path} ({len(basic_cards)} карт.)"
+        )
 
-        front_raw = remove_scheduling_comment(front_raw)
-        back_raw = remove_scheduling_comment(back_raw)
+    # Генерация файла Cloze
+    if cloze_cards:
+        cloze_path = os.path.join(
+            output_dir, f"{topic_name}_anki_cloze.txt"
+        )
+        _write_anki_cloze_file(cloze_cards, cloze_path, deck_name)
+        created_files.append(cloze_path)
+        logger.info(
+            f"Создан Anki Cloze: {cloze_path} ({len(cloze_cards)} карт.)"
+        )
 
-        front_raw = remove_spaced_repetition_tags(remove_obsidian_links(front_raw))
-        back_raw = remove_spaced_repetition_tags(remove_obsidian_links(back_raw))
+    if not created_files:
+        logger.warning(f"Нет карточек для Anki в теме '{topic_name}'")
 
-        front = format_markdown_to_html(front_raw)
-        back = format_markdown_to_html(back_raw)
-
-        if card.code_snippets:
-            for snippet in card.code_snippets:
-                if snippet.strip() and snippet.strip() not in card.answer:
-                    back += "<br>" + format_code_for_anki(snippet)
-
-        front = front.replace('\t', '    ')
-        back = back.replace('\t', '    ')
-
-        tag_values = normalize_tags(card.tags)
-        tags = ' '.join([f"interview/{tag.lstrip('#')}" for tag in tag_values if tag])
-
-        cards_lines.append(f"{front}\t{back}\t{deck_name}\t\t{tags}")
-
-    content = header + '\n'.join(cards_lines)
-
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(content)
-
-    logger.info(f"Создан файл Anki: {file_path}")
-    return file_path
+    return created_files
 
 
 # =============================================================================
@@ -1269,84 +1669,94 @@ def generate_anki_import_file(
 
 def clean_up_duplicates(file_paths: List[str]) -> int:
     """
-    Удаляет дубликаты вопросов из файлов Anki.
+    Удаляет дубликаты карточек из файлов Anki.
+
+    Дедупликация по первому столбцу (Front для Basic, Text для Cloze)
+    с учётом кросс-файловых дубликатов.
+
+    Не требует pandas — работает через чтение строк.
     """
-    dfs: List[pd.DataFrame] = []
-
-    for file_path in file_paths:
-        if os.path.exists(file_path):
-            try:
-                df = pd.read_csv(
-                    file_path,
-                    header=None,
-                    names=['question', 'answer', 'deck', 'empty', 'tags'],
-                    sep='\t',
-                    on_bad_lines='skip',
-                    comment='#'
-                )
-                dfs.append(df)
-            except Exception as e:
-                logger.warning(f"Ошибка чтения {file_path}: {e}")
-                continue
-
-    if not dfs:
+    if not file_paths:
         return 0
 
-    combined_df = pd.concat(dfs, ignore_index=True)
-    initial_count = len(combined_df)
-    combined_df.drop_duplicates(subset=['question'], inplace=True)
-    final_count = len(combined_df)
-    removed_count = initial_count - final_count
+    seen_questions: Set[str] = set()
+    total_removed = 0
 
-    split_dfs = []
-    start_idx = 0
-    for df in dfs:
-        end_idx = start_idx + len(df)
-        split_df = combined_df[(combined_df.index >= start_idx) & (combined_df.index < end_idx)]
-        split_dfs.append(split_df)
-        start_idx = end_idx
+    for file_path in file_paths:
+        if not os.path.exists(file_path):
+            continue
 
-    for i, df in enumerate(split_dfs):
-        header = "#separator:tab\n#html:true\n#deck column:2\n#tags column:4\n"
-        body = df.to_csv(index=False, header=False, sep='\t').strip()
-        with open(file_paths[i], 'w', encoding='utf-8') as f:
-            f.write(header)
-            if body:
-                f.write(body + '\n')
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                all_lines = f.readlines()
 
-    logger.info(f"Удалено дубликатов: {removed_count}")
-    return removed_count
+            header_lines: List[str] = []
+            data_lines: List[str] = []
+
+            for line in all_lines:
+                stripped = line.strip()
+                if stripped.startswith('#') or not stripped:
+                    header_lines.append(line)
+                else:
+                    data_lines.append(line)
+
+            unique_data: List[str] = []
+            for line in data_lines:
+                parts = line.split('\t')
+                question_key = normalize_text_key(parts[0]) if parts else ""
+                if question_key and question_key not in seen_questions:
+                    seen_questions.add(question_key)
+                    unique_data.append(line)
+                elif not question_key:
+                    unique_data.append(line)
+
+            removed = len(data_lines) - len(unique_data)
+            total_removed += removed
+
+            if removed > 0:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.writelines(header_lines)
+                    f.writelines(unique_data)
+                logger.info(
+                    f"Удалено {removed} дубл. из {os.path.basename(file_path)}"
+                )
+
+        except Exception as e:
+            logger.warning(f"Ошибка обработки {file_path}: {e}")
+            continue
+
+    logger.info(f"Всего удалено дубликатов: {total_removed}")
+    return total_removed
 
 
 def natural_sort(file_paths: List[str]) -> List[str]:
-    """
-    Естественная сортировка файлов.
-    """
+    """Естественная сортировка файлов."""
 
     def natural_key(text: str) -> List:
-        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+        return [
+            int(c) if c.isdigit() else c.lower()
+            for c in re.split(r'(\d+)', text)
+        ]
 
     return sorted(file_paths, key=natural_key)
 
 
 def get_markdown_files(folder_paths: List[str]) -> List[str]:
-    """
-    Получает список Markdown файлов из папок.
-    """
+    """Получает список Markdown файлов из папок."""
     file_paths: List[str] = []
 
     for folder_path in folder_paths:
         if os.path.exists(folder_path):
-            files = glob.glob(os.path.join(folder_path, '**/*.md'), recursive=True)
+            files = glob.glob(
+                os.path.join(folder_path, '**/*.md'), recursive=True
+            )
             file_paths.extend(files)
 
     return natural_sort(file_paths)
 
 
 def validate_markdown_structure(content: str) -> bool:
-    """
-    Проверяет структуру Markdown на наличие карточек.
-    """
+    """Проверяет структуру Markdown на наличие карточек."""
     has_single_basic = bool(re.search(r'[^:]::[^:]', content))
     has_single_bidirectional = bool(re.search(r':::', content))
     has_multi_basic = bool(re.search(r'\n\?\n', content))
@@ -1367,9 +1777,7 @@ def process_cards_batch(
         output_dir: str,
         batch_size: int = 500
 ) -> List[str]:
-    """
-    Обрабатывает карточки батчами для больших наборов данных.
-    """
+    """Обрабатывает карточки батчами для больших наборов данных."""
     output_files: List[str] = []
 
     for i in range(0, len(cards), batch_size):
@@ -1377,11 +1785,16 @@ def process_cards_batch(
         batch_num = (i // batch_size) + 1
         total_batches = (len(cards) + batch_size - 1) // batch_size
 
-        category_name = f"{category}_part{batch_num}" if total_batches > 1 else category
-        output_path = os.path.join(output_dir, f"{category_name}.txt")
+        category_name = (
+            f"{category}_part{batch_num}"
+            if total_batches > 1
+            else category
+        )
 
-        generate_anki_import_file(batch, category_name, output_path)
-        output_files.append(output_path)
+        anki_files = generate_anki_import_file(
+            batch, category_name, output_dir
+        )
+        output_files.extend(anki_files)
 
     return output_files
 
@@ -1393,9 +1806,7 @@ def generate_all_formats(
         anki_output: str,
         use_reverse_cards: bool = True
 ) -> List[str]:
-    """
-    Генерирует все форматы вывода карточек.
-    """
+    """Генерирует все форматы вывода карточек."""
     output_files: List[str] = []
 
     if not cards:
@@ -1404,7 +1815,10 @@ def generate_all_formats(
     topic_name = cards[0].topic
     deck_name = cards[0].deck_name
 
-    logger.info(f"Генерация для темы: {topic_name} (Категория: {category}, Deck: {deck_name})")
+    logger.info(
+        f"Генерация для темы: {topic_name} "
+        f"(Категория: {category}, Deck: {deck_name})"
+    )
 
     os.makedirs(cards_output, exist_ok=True)
     os.makedirs(anki_output, exist_ok=True)
@@ -1413,7 +1827,11 @@ def generate_all_formats(
     obsidian_cards = [c for c in cards if not c.is_reverse]
 
     # Для Anki reverse можно оставить или убрать по флагу.
-    anki_cards = cards if use_reverse_cards else [c for c in cards if not c.is_reverse]
+    anki_cards = (
+        cards
+        if use_reverse_cards
+        else [c for c in cards if not c.is_reverse]
+    )
 
     if obsidian_cards:
         merged_file = generate_obsidian_topic_file(
@@ -1425,12 +1843,12 @@ def generate_all_formats(
         output_files.append(merged_file)
 
     if anki_cards:
-        anki_file = generate_anki_import_file(
+        anki_files = generate_anki_import_file(
             anki_cards,
             topic_name,
             anki_output
         )
-        output_files.append(anki_file)
+        output_files.extend(anki_files)
 
     logger.info(f"Сгенерировано файлов: {len(output_files)}")
     return output_files
