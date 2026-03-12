@@ -1,7 +1,6 @@
 """
 Основной модуль с общей логикой генерации карточек.
 Используется как Streamlit, так и CLI версиями.
-Полностью совместим с Obsidian Spaced Repetition.
 """
 
 import logging
@@ -31,42 +30,22 @@ class GenerationResult:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     topics_processed: int = 0
+    cards_by_type: Dict[str, int] = field(default_factory=dict)
+    cards_by_category: Dict[str, int] = field(default_factory=dict)
 
 
 class CardGenerator:
     """
     Класс для генерации карточек из Markdown файлов.
     Инкапсулирует общую логику для Streamlit и CLI версий.
-
-    Совместим с Obsidian Spaced Repetition форматами:
-    - Single-line Basic: question::answer
-    - Single-line Bidirectional: info1:::info2
-    - Multi-line Basic: question\n?\nanswer
-    - Multi-line Bidirectional: info1\n??\ninfo2
-    - Cloze: text with ==hidden parts==
     """
 
     def __init__(self, config: AppConfig, use_reverse_cards: bool = True):
-        """
-        Инициализация генератора.
-
-        Args:
-            config: Конфигурация приложения
-            use_reverse_cards: Использовать двухсторонние карточки
-        """
         self.config = config
         self.use_reverse_cards = use_reverse_cards
 
     def validate_input_directory(self, input_dir: str) -> Tuple[bool, str]:
-        """
-        Проверяет существование и содержимое директории.
-
-        Args:
-            input_dir: Путь к директории
-
-        Returns:
-            Tuple[bool, str]: (валидность, сообщение)
-        """
+        """Проверяет существование и содержимое директории."""
         if not os.path.exists(input_dir):
             return False, f"Папка не найдена: {input_dir}"
 
@@ -76,30 +55,71 @@ class CardGenerator:
 
         return True, f"Найдено тем: {len(topics)}"
 
-    def create_example_file(self, input_dir: str, template_path: Optional[str] = None) -> str:
+    def get_topics_summary(self, input_dir: str) -> List[Dict]:
         """
-        Создаёт пример Markdown файла в директории.
+        Возвращает сводку по темам для отображения в UI.
 
         Args:
             input_dir: Путь к директории
-            template_path: Путь к шаблону (опционально)
 
         Returns:
-            str: Путь к созданному файлу
+            List[Dict]: Список словарей с метаданными тем
         """
+        topics = load_markdown_topics(input_dir)
+        summary = []
+
+        for name, data in topics.items():
+            cards = parse_cards_from_markdown(data['path'])
+
+            type_counts = {}
+            for card in cards:
+                type_name = card.card_type.value
+                type_counts[type_name] = type_counts.get(type_name, 0) + 1
+
+            summary.append({
+                'name': name,
+                'path': data['path'],
+                'category': data.get('category', 'general'),
+                'deck_name': data.get('deck_name', ''),
+                'total_cards': len(cards),
+                'cards_by_type': type_counts,
+                'has_cloze': 'cloze' in type_counts,
+                'has_code': any(c.has_code() for c in cards),
+            })
+
+        return summary
+
+    def preview_cards(self, file_path: str) -> List[InterviewCard]:
+        """
+        Парсит и возвращает карточки из файла для предпросмотра.
+
+        Args:
+            file_path: Путь к Markdown файлу
+
+        Returns:
+            List[InterviewCard]: Список карточек
+        """
+        return parse_cards_from_markdown(file_path)
+
+    def create_example_file(
+            self,
+            input_dir: str,
+            template_path: Optional[str] = None
+    ) -> str:
+        """Создаёт пример Markdown файла в директории."""
         os.makedirs(input_dir, exist_ok=True)
         example_path = os.path.join(input_dir, "example_topic.md")
 
-        # Пытаемся загрузить контент из файла шаблона
         content = ""
         if template_path and os.path.exists(template_path):
             try:
                 with open(template_path, 'r', encoding='utf-8') as f:
                     content = f.read()
             except Exception as e:
-                logger.error(f"Не удалось прочитать файл шаблона {template_path}: {e}")
+                logger.error(
+                    f"Не удалось прочитать шаблон {template_path}: {e}"
+                )
 
-        # Если контент не удалось загрузить - читаем из templates/example_topic.md
         if not content:
             content = self._get_example_content()
 
@@ -110,17 +130,12 @@ class CardGenerator:
         return example_path
 
     def _get_example_content(self) -> str:
-        """
-        Загружает пример контента из файла шаблона templates/example_topic.md.
-
-        Returns:
-            str: Пример Markdown контента или пустая строка
-        """
-        # Определяем путь к файлу шаблона относительно текущего файла
+        """Загружает пример контента из файла шаблона."""
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        template_path = os.path.join(current_dir, "..", "templates", "example_topic.md")
+        template_path = os.path.join(
+            current_dir, "..", "templates", "example_topic.md"
+        )
 
-        # Пытаемся загрузить контент из шаблона
         if os.path.exists(template_path):
             try:
                 with open(template_path, 'r', encoding='utf-8') as f:
@@ -128,20 +143,19 @@ class CardGenerator:
                     if content:
                         return content
             except Exception as e:
-                logger.error(f"Не удалось прочитать файл шаблона {template_path}: {e}")
+                logger.error(f"Не удалось прочитать шаблон: {e}")
 
-        # Fallback: минимальный пример если шаблон не найден
-        # Соответствует формату templates/example_topic.md
-        logger.warning(f"Файл шаблона не найден: {template_path}, используется минимальный пример")
-        return '''---
-        tags: [flashcards/example]
-        category: general
-        ---
-        
-        # Пример карточки
-        
-        Что такое Spaced Repetition?::Метод обучения с повторением через увеличивающиеся интервалы
-        '''
+        logger.warning("Шаблон не найден, используется минимальный пример")
+        return (
+            '---\n'
+            'tags: [flashcards/example]\n'
+            'category: general\n'
+            '---\n\n'
+            '# Пример карточки\n\n'
+            'Что такое Spaced Repetition?::'
+            'Метод обучения с повторением через '
+            'увеличивающиеся интервалы\n'
+        )
 
     def copy_material_to_vault(
             self,
@@ -149,41 +163,29 @@ class CardGenerator:
             topic_name: str,
             category: str
     ) -> Optional[str]:
-        """
-        Копирует файл материала в Obsidian Vault.
-
-        Args:
-            source_path: Путь к исходному файлу
-            topic_name: Имя темы
-            category: Категория
-
-        Returns:
-            Optional[str]: Путь к скопированному файлу или None
-        """
+        """Копирует файл материала в Obsidian Vault."""
         materials_path = self.config.get_materials_path(category)
         target_path = os.path.join(materials_path, f"{topic_name}.md")
 
-        # Нормализация путей для сравнения
         source_abs = os.path.abspath(source_path)
         target_abs = os.path.abspath(target_path)
-        vault_materials_root_abs = os.path.abspath(self.config.materials_source)
+        vault_root_abs = os.path.abspath(self.config.materials_source)
 
-        # 1. Если исходный файл уже находится в целевой папке
         if source_abs == target_abs:
             return target_path
 
-        # 2. Если файл уже внутри папки Materials
-        if source_abs.startswith(vault_materials_root_abs + os.sep):
+        if source_abs.startswith(vault_root_abs + os.sep):
             return source_path
 
-        # 3. Копируем файл
         try:
             os.makedirs(materials_path, exist_ok=True)
             shutil.copy2(source_path, target_path)
             logger.debug(f"Скопирован материал: {target_path}")
             return target_path
         except PermissionError:
-            logger.warning(f"Не удалось скопировать {topic_name}: файл занят или нет прав")
+            logger.warning(
+                f"Не удалось скопировать {topic_name}: нет прав"
+            )
             return None
         except Exception as e:
             logger.error(f"Ошибка копирования {topic_name}: {e}")
@@ -193,7 +195,10 @@ class CardGenerator:
             self,
             input_dir: str,
             selected_categories: Optional[List[str]] = None,
-            clean_duplicates: bool = False
+            clean_duplicates: bool = False,
+            export_format: str = "both",
+            use_reverse_cards: Optional[bool] = None,
+            progress_callback=None,
     ) -> GenerationResult:
         """
         Выполняет генерацию карточек.
@@ -202,11 +207,22 @@ class CardGenerator:
             input_dir: Путь к папке с Markdown файлами
             selected_categories: Выбранные категории (None = все)
             clean_duplicates: Удалить дубликаты
+            export_format: Формат ('both', 'obsidian', 'anki')
+            use_reverse_cards: Обратные карточки (None = из __init__)
+            progress_callback: Функция обратного вызова для прогресса
+                               callback(current, total, topic_name)
 
         Returns:
             GenerationResult: Результат генерации
         """
         result = GenerationResult(success=False)
+
+        # Определяем параметр reverse
+        reverse = (
+            use_reverse_cards
+            if use_reverse_cards is not None
+            else self.use_reverse_cards
+        )
 
         # Валидация
         is_valid, message = self.validate_input_directory(input_dir)
@@ -226,26 +242,47 @@ class CardGenerator:
 
         all_cards: List[InterviewCard] = []
         card_id = 1
+        total_topics = len(topics)
 
         # Обработка каждой темы
-        for topic_name, topic_data in topics.items():
+        for idx, (topic_name, topic_data) in enumerate(topics.items()):
             topic_category = topic_data.get('category', 'general')
 
+            # Прогресс
+            if progress_callback:
+                progress_callback(idx, total_topics, topic_name)
+
             # Проверка категории
-            if selected_categories and topic_category not in selected_categories:
-                result.warnings.append(f"Категория '{topic_category}' не выбрана: {topic_name}")
+            if (selected_categories
+                    and topic_category not in selected_categories):
+                result.warnings.append(
+                    f"Категория '{topic_category}' "
+                    f"не выбрана: {topic_name}"
+                )
                 continue
 
             # Парсинг карточек
             cards = parse_cards_from_markdown(topic_data['path'], card_id)
 
             if not cards:
-                result.warnings.append(f"Нет валидных карточек в теме '{topic_name}'")
+                result.warnings.append(
+                    f"Нет валидных карточек в теме '{topic_name}'"
+                )
                 continue
 
             card_id += len(cards)
 
-            # Получаем путь к файлу материала
+            # Статистика по типам
+            for card in cards:
+                type_name = card.card_type.value
+                result.cards_by_type[type_name] = (
+                        result.cards_by_type.get(type_name, 0) + 1
+                )
+                result.cards_by_category[topic_category] = (
+                        result.cards_by_category.get(topic_category, 0) + 1
+                )
+
+            # Копирование материала в Vault
             material_file_path = self.copy_material_to_vault(
                 topic_data['path'],
                 topic_name,
@@ -255,7 +292,9 @@ class CardGenerator:
             # Вычисляем ссылку для Obsidian
             if material_file_path:
                 try:
-                    link_path = os.path.relpath(material_file_path, self.config.obsidian_vault)
+                    link_path = os.path.relpath(
+                        material_file_path, self.config.obsidian_vault
+                    )
                     link_path = link_path.replace('\\', '/')
                     if link_path.endswith('.md'):
                         link_path = link_path[:-3]
@@ -264,7 +303,6 @@ class CardGenerator:
             else:
                 link_path = topic_name
 
-            # Проставляем ссылку во все карточки
             for card in cards:
                 card.source_note = link_path
 
@@ -278,23 +316,36 @@ class CardGenerator:
                     topic_category,
                     cards_path,
                     anki_path,
-                    use_reverse_cards=self.use_reverse_cards
+                    use_reverse_cards=reverse,
+                    formats=export_format,
                 )
                 result.output_files.extend(files)
                 all_cards.extend(cards)
                 result.topics_processed += 1
-                logger.info(f"Тема '{topic_name}': {len(cards)} карточек")
+                logger.info(
+                    f"Тема '{topic_name}': {len(cards)} карточек"
+                )
             except Exception as e:
-                result.errors.append(f"Ошибка генерации '{topic_name}': {e}")
+                result.errors.append(
+                    f"Ошибка генерации '{topic_name}': {e}"
+                )
                 logger.error(f"Ошибка генерации '{topic_name}': {e}")
+
+        # Финальный прогресс
+        if progress_callback:
+            progress_callback(total_topics, total_topics, "Завершено")
 
         # Удаление дубликатов
         if clean_duplicates and result.output_files:
-            txt_files = [f for f in result.output_files if f.endswith('.txt')]
+            txt_files = [
+                f for f in result.output_files if f.endswith('.txt')
+            ]
             if txt_files:
                 removed = clean_up_duplicates(txt_files)
                 if removed > 0:
-                    result.warnings.append(f"Удалено дубликатов: {removed}")
+                    result.warnings.append(
+                        f"Удалено дубликатов: {removed}"
+                    )
 
         result.total_cards = len(all_cards)
         result.success = result.total_cards > 0
@@ -302,15 +353,40 @@ class CardGenerator:
         return result
 
     def get_output_paths(self) -> Dict[str, str]:
-        """
-        Возвращает пути вывода для отображения.
-
-        Returns:
-            Dict[str, str]: Словарь путей
-        """
+        """Возвращает пути вывода для отображения."""
         return {
             'obsidian_vault': self.config.obsidian_vault,
-            'cards': os.path.join(self.config.obsidian_vault, 'Interview', 'Cards'),
-            'materials': os.path.join(self.config.obsidian_vault, 'Interview', 'Materials'),
+            'cards': os.path.join(
+                self.config.obsidian_vault, 'Interview', 'Cards'
+            ),
+            'materials': os.path.join(
+                self.config.obsidian_vault, 'Interview', 'Materials'
+            ),
             'anki': os.path.join(self.config.output, 'anki'),
         }
+
+    def clean_output_files(
+            self, file_paths: List[str]
+    ) -> Tuple[int, List[str]]:
+        """
+        Удаляет указанные сгенерированные файлы.
+
+        Args:
+            file_paths: Список путей к файлам
+
+        Returns:
+            Tuple[int, List[str]]: (удалено, ошибки)
+        """
+        deleted = 0
+        errors = []
+
+        for fp in file_paths:
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+                    deleted += 1
+                    logger.info(f"Удалён: {fp}")
+            except Exception as e:
+                errors.append(f"Не удалось удалить {fp}: {e}")
+
+        return deleted, errors

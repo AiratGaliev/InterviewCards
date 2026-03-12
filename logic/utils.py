@@ -1804,9 +1804,23 @@ def generate_all_formats(
         category: str,
         cards_output: str,
         anki_output: str,
-        use_reverse_cards: bool = True
+        use_reverse_cards: bool = True,
+        formats: str = "both",
 ) -> List[str]:
-    """Генерирует все форматы вывода карточек."""
+    """
+    Генерирует выбранные форматы вывода карточек.
+
+    Args:
+        cards: Список карточек
+        category: Категория
+        cards_output: Папка для Obsidian файлов
+        anki_output: Папка для Anki файлов
+        use_reverse_cards: Включать reverse-карточки в Anki
+        formats: Формат вывода ('both', 'obsidian', 'anki')
+
+    Returns:
+        List[str]: Пути к созданным файлам
+    """
     output_files: List[str] = []
 
     if not cards:
@@ -1815,25 +1829,27 @@ def generate_all_formats(
     topic_name = cards[0].topic
     deck_name = cards[0].deck_name
 
+    gen_obsidian = formats in ("both", "obsidian")
+    gen_anki = formats in ("both", "anki")
+
     logger.info(
         f"Генерация для темы: {topic_name} "
-        f"(Категория: {category}, Deck: {deck_name})"
+        f"(Категория: {category}, Deck: {deck_name}, "
+        f"Форматы: {formats})"
     )
 
-    os.makedirs(cards_output, exist_ok=True)
-    os.makedirs(anki_output, exist_ok=True)
-
-    # Для Obsidian reverse не нужны: ::: и ?? сами создают двусторонность.
+    # Для Obsidian reverse не нужны
     obsidian_cards = [c for c in cards if not c.is_reverse]
 
-    # Для Anki reverse можно оставить или убрать по флагу.
+    # Для Anki reverse — по флагу
     anki_cards = (
         cards
         if use_reverse_cards
         else [c for c in cards if not c.is_reverse]
     )
 
-    if obsidian_cards:
+    if gen_obsidian and obsidian_cards:
+        os.makedirs(cards_output, exist_ok=True)
         merged_file = generate_obsidian_topic_file(
             obsidian_cards,
             topic_name,
@@ -1842,7 +1858,8 @@ def generate_all_formats(
         )
         output_files.append(merged_file)
 
-    if anki_cards:
+    if gen_anki and anki_cards:
+        os.makedirs(anki_output, exist_ok=True)
         anki_files = generate_anki_import_file(
             anki_cards,
             topic_name,

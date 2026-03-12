@@ -30,3 +30,4 @@ Thumbs.db
 
 # Logs
 *.log
+/.interview_cards_settings.json
