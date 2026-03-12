@@ -779,17 +779,62 @@ def render_tab_files(generator: CardGenerator):
 
     # ─── Группировка по типу ─────────────────────
     obsidian_files = [f for f in existing_files if f.endswith('.md')]
-    anki_files = [f for f in existing_files if f.endswith('.txt')]
+    anki_basic = [
+        f for f in existing_files
+        if '_anki_basic' in os.path.basename(f)
+    ]
+    anki_reversed = [
+        f for f in existing_files
+        if '_anki_reversed' in os.path.basename(f)
+    ]
+    anki_cloze = [
+        f for f in existing_files
+        if '_anki_cloze' in os.path.basename(f)
+    ]
+    # Файлы, не попавшие в группы
+    grouped = set(obsidian_files + anki_basic + anki_reversed + anki_cloze)
+    other_files = [f for f in existing_files if f not in grouped]
+
+    file_idx = 0
 
     if obsidian_files:
         st.markdown("#### 📝 Obsidian Spaced Repetition")
-        for idx, fp in enumerate(obsidian_files):
-            _render_file_row(fp, idx, "obs")
+        for fp in obsidian_files:
+            _render_file_row(fp, file_idx, "obs")
+            file_idx += 1
 
-    if anki_files:
-        st.markdown("#### 🃏 Anki Import")
-        for idx, fp in enumerate(anki_files):
-            _render_file_row(fp, idx + len(obsidian_files), "anki")
+    if anki_basic:
+        st.markdown("#### 🟢 Anki — Basic (:: и ?)")
+        st.caption("Note type: Basic · одно направление")
+        for fp in anki_basic:
+            _render_file_row(fp, file_idx, "basic")
+            file_idx += 1
+
+    if anki_reversed:
+        st.markdown("#### 🔵 Anki — Bidirectional (::: и ??)")
+        st.caption(
+            "Note type: Basic (and reversed card) · "
+            "Anki создаёт оба направления автоматически"
+        )
+        for fp in anki_reversed:
+            _render_file_row(fp, file_idx, "rev")
+            file_idx += 1
+
+    if anki_cloze:
+        st.markdown("#### 🟠 Anki — Cloze (==…==)")
+        st.caption(
+            "Note type: Cloze · "
+            "==text== → {{c1::text}}"
+        )
+        for fp in anki_cloze:
+            _render_file_row(fp, file_idx, "cloze")
+            file_idx += 1
+
+    if other_files:
+        st.markdown("#### 📄 Другие файлы")
+        for fp in other_files:
+            _render_file_row(fp, file_idx, "other")
+            file_idx += 1
 
     st.divider()
 
@@ -983,15 +1028,24 @@ def render_tab_settings(config):
         **Как импортировать в Anki:**
         
         1. Откройте Anki → **File → Import...**
-        2. Выберите файл `*_anki_basic.txt` или `*_anki_cloze.txt`
+        2. Выберите нужный файл
         3. Anki автоматически определит формат из заголовков
         4. Нажмите **Import**
-        
+            
+        **Типы файлов (соответствуют Obsidian SR):**
+    
+        | Файл | Note Type | Исходный формат |
+        |------|-----------|-----------------|
+        | `*_anki_basic.txt` | Basic | `::` и `?` |
+        | `*_anki_reversed.txt` | Basic (and reversed card) | `:::` и `??` |
+        | `*_anki_cloze.txt` | Cloze | `==text==` |
+    
         **Особенности:**
-        - Basic и Cloze карточки в **раздельных файлах**
-          (разные Note Types)
-        - Cloze автоматически конвертируется:
-          `==text==` → `{{c1::text}}`
+        - **Basic** — одно направление: Front → Back
+        - **Reversed** — Anki автоматически создаёт оба направления
+          (не нужно импортировать 2 карточки вручную)
+        - **Cloze** — конвертация `==text==` → `{{c1::text}}`
+          с поддержкой подсказок и группировки
         - Теги и колоды проставляются автоматически
         - При повторном импорте дубликаты обновляются
         """)

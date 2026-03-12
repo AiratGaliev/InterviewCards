@@ -20,30 +20,37 @@ from logic.utils import (
     convert_cloze_to_anki_format,
     generate_card_guid,
     escape_for_tsv,
+    ANKI_NOTE_TYPES,
+    BASIC_CARD_TYPES,
+    BIDIRECTIONAL_CARD_TYPES,
 )
 
 __all__ = [
-    # utils — парсинг
+    # Константы
+    'ANKI_NOTE_TYPES',
+    'BASIC_CARD_TYPES',
+    'BIDIRECTIONAL_CARD_TYPES',
+    # Парсинг
     'load_markdown_topics',
     'parse_cards_from_markdown',
     'parse_all_markdown_files',
-    # utils — генерация
+    # Генерация
     'generate_anki_import_file',
     'generate_all_formats',
     'clean_up_duplicates',
     'process_cards_batch',
-    # utils — форматирование
+    # Форматирование
     'extract_frontmatter',
     'format_markdown_to_html',
     'format_markdown_to_anki_html',
     'remove_obsidian_links',
     'remove_spaced_repetition_tags',
     'validate_markdown_structure',
-    # utils — Anki конвертация
+    # Anki конвертация
     'convert_cloze_to_anki_format',
     'generate_card_guid',
     'escape_for_tsv',
-    # core
+    # Core
     'CardGenerator',
     'GenerationResult',
 ]
