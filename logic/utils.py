@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
+from pygments import highlight as pygments_highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_by_name, TextLexer
 
 from models.InterviewCard import (
     InterviewCard, CardType, ClozeDeletion, SchedulingData
@@ -1000,40 +1003,69 @@ def escape_for_tsv(text: str) -> str:
 
 def format_code_for_anki(code: str, language: str = 'text') -> str:
     """
-    Форматирует код для Anki.
-    Возвращает HTML БЕЗ символов \\n (всё в одну строку).
+    Форматирует код с подсветкой синтаксиса (Pygments + Monokai) для Anki.
+    Возвращает HTML БЕЗ символов \\n — всё в одну строку.
     """
     if not code:
         return ""
 
     code = code.strip()
-    code = escape_html(code)
-    code = code.replace('\n', '<br>')
-    code = code.replace('  ', '&nbsp;&nbsp;')
+    language = language.strip().lower() if language else 'text'
 
+    # Подбор лексера
+    try:
+        lexer = get_lexer_by_name(language, stripall=True)
+    except Exception:
+        lexer = TextLexer(stripall=True)
+
+    # Подсветка: inline CSS, без обёрток
+    formatter = HtmlFormatter(
+        noclasses=True,
+        nowrap=True,
+        style='monokai',
+    )
+
+    highlighted = pygments_highlight(code, lexer, formatter)
+    highlighted = highlighted.strip()
+    highlighted = highlighted.replace('\n', '<br>')
+
+    # Плашка языка
     lang_colors = {
         'python': '#306998', 'javascript': '#f7df1e',
         'typescript': '#3178c6', 'java': '#ed8b00',
         'sql': '#e38c00', 'bash': '#4eaa25',
-        'json': '#292929', 'go': '#00add8',
-        'rust': '#ce412b', 'shell': '#4eaa25',
-        'text': '#666',
+        'shell': '#4eaa25', 'json': '#292929',
+        'go': '#00add8', 'rust': '#ce412b',
+        'xml': '#e44d26', 'html': '#e44d26',
+        'css': '#264de4', 'kotlin': '#7f52ff',
+        'swift': '#fa7343', 'c': '#555',
+        'cpp': '#004482', 'csharp': '#239120',
+        'ruby': '#cc342d', 'php': '#777bb4',
+        'yaml': '#cb171e', 'text': '#666',
     }
     accent = lang_colors.get(language, '#666')
+    lang_label = escape_html(language)
 
-    # Весь HTML в ОДНУ строку — никаких \n
-    return (
+    result = (
         f'<div style="margin:8px 0;">'
         f'<div style="background:{accent};color:#fff;'
         f'padding:2px 8px;border-radius:4px 4px 0 0;'
         f'font-size:0.75em;display:inline-block;">'
-        f'{escape_html(language)}</div>'
-        f'<pre style="background:#1e1e1e;color:#d4d4d4;'
+        f'{lang_label}</div>'
+        f'<pre style="background:#272822;color:#f8f8f2;'
         f'padding:12px;border-radius:0 4px 4px 4px;'
-        f'overflow-x:auto;margin:0;font-size:0.9em;'
-        f'font-family:monospace;">'
-        f'<code>{code}</code></pre></div>'
+        f'overflow-x:auto;margin:0;font-size:0.85em;'
+        f'line-height:1.5;'
+        f'font-family:\'Fira Code\',Consolas,'
+        f'\'Courier New\',monospace;">'
+        f'{highlighted}</pre></div>'
     )
+
+    # Гарантируем одну строку для TSV
+    result = result.replace('\n', '')
+    result = result.replace('\r', '')
+
+    return result
 
 
 def format_markdown_to_html(text: str) -> str:
@@ -1071,55 +1103,43 @@ def format_markdown_to_html(text: str) -> str:
 def format_markdown_to_anki_html(text: str) -> str:
     """
     Конвертирует Markdown в HTML для Anki.
-
-    Порядок обработки:
-    1. Защита fenced code blocks (``` ... ```)
-    2. Защита inline code (` ... `)
-    3. Markdown → HTML (bold, italic, headers, lists, etc.)
-    4. Восстановление inline code
-    5. Восстановление code blocks
-
-    Результат НЕ содержит символов \\n — все переносы как <br>.
+    Кодовые блоки подсвечиваются через Pygments (Monokai).
     """
     if not text:
         return ""
 
     result = text
 
-    # ═══════════════════════════════════════════════
-    # 1. Защита fenced code blocks
-    # ═══════════════════════════════════════════════
+    # Нормализация отступов у ```
+    result = re.sub(
+        r'^[ \t]+(```)', r'\1', result, flags=re.MULTILINE,
+    )
+
+    # ─── 1. Защита fenced code blocks ────────────
     code_blocks: List[Tuple[str, str]] = []
 
     def _save_code_block(m):
-        lang = (m.group(1) or 'text').strip()
-        code = m.group(2)
+        lang = (m.group(1) or 'text').strip().lower()
+        code_content = m.group(2)
         idx = len(code_blocks)
-        code_blocks.append((lang, code))
+        code_blocks.append((lang, code_content))
         return f"\x00CB{idx}\x00"
 
-    # Основной regex — ловит отступы перед ``` и пробелы вокруг языка
     result = re.sub(
-        r'[ \t]*```[ \t]*(\w*)[ \t]*\r?\n(.*?)\r?\n[ \t]*```',
-        _save_code_block,
-        result,
-        flags=re.DOTALL,
+        r'```\s*(\w*)\s*\r?\n(.*?)\r?\n\s*```',
+        _save_code_block, result, flags=re.DOTALL,
     )
-
-    # Fallback: код без завершающего ``` (конец текста)
     result = re.sub(
-        r'[ \t]*```[ \t]*(\w*)[ \t]*\r?\n(.*?)$',
-        _save_code_block,
-        result,
-        flags=re.DOTALL,
+        r'```\s*(\w*)\s*\r?\n(.*?)```',
+        _save_code_block, result, flags=re.DOTALL,
     )
+    result = re.sub(
+        r'```\s*(\w*)\s*\r?\n(.*?)$',
+        _save_code_block, result, flags=re.DOTALL,
+    )
+    result = re.sub(r'```\s*\w*\s*', '', result)
 
-    # Убираем оставшиеся одиночные ``` (если regex не поймал)
-    result = re.sub(r'[ \t]*```[ \t]*\w*[ \t]*', '', result)
-
-    # ═══════════════════════════════════════════════
-    # 2. Защита inline code
-    # ═══════════════════════════════════════════════
+    # ─── 2. Защита inline code ───────────────────
     inline_codes: List[str] = []
 
     def _save_inline(m):
@@ -1127,107 +1147,93 @@ def format_markdown_to_anki_html(text: str) -> str:
         inline_codes.append(m.group(1))
         return f"\x00IC{idx}\x00"
 
+    result = re.sub(r'``([^`]+)``', _save_inline, result)
     result = re.sub(r'`([^`\n]+)`', _save_inline, result)
+    result = re.sub(r'`+', '', result)
 
-    # Убираем оставшиеся одиночные backticks
-    result = result.replace('`', '')
-
-    # ═══════════════════════════════════════════════
-    # 3. Markdown → HTML
-    # ═══════════════════════════════════════════════
-
-    # Bold и Italic
+    # ─── 3. Markdown → HTML ──────────────────────
     result = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', result)
     result = re.sub(
-        r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', result
+        r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', result,
     )
 
-    # Заголовки
     result = re.sub(
-        r'^[ \t]*####\s+(.+)$', r'<h4>\1</h4>',
+        r'^####\s+(.+)$', r'<h4>\1</h4>',
         result, flags=re.MULTILINE,
     )
     result = re.sub(
-        r'^[ \t]*###\s+(.+)$', r'<h3>\1</h3>',
+        r'^###\s+(.+)$', r'<h3>\1</h3>',
         result, flags=re.MULTILINE,
     )
     result = re.sub(
-        r'^[ \t]*##\s+(.+)$', r'<h2>\1</h2>',
+        r'^##\s+(.+)$', r'<h2>\1</h2>',
         result, flags=re.MULTILINE,
     )
     result = re.sub(
-        r'^[ \t]*#\s+(.+)$', r'<h1>\1</h1>',
+        r'^#\s+(.+)$', r'<h1>\1</h1>',
         result, flags=re.MULTILINE,
     )
 
-    # Горизонтальный разделитель
     result = re.sub(
-        r'^[ \t]*-{3,}[ \t]*$', '<hr>', result, flags=re.MULTILINE,
+        r'^-{3,}\s*$', '<hr>', result, flags=re.MULTILINE,
     )
 
     # Blockquote
     lines = result.split('\n')
-    processed_lines: List[str] = []
+    processed: List[str] = []
     in_bq = False
     for line in lines:
         stripped = line.strip()
         if stripped.startswith('>'):
             if not in_bq:
-                processed_lines.append(
+                processed.append(
                     '<blockquote style="border-left:3px solid #ccc;'
                     'padding-left:10px;color:#555;margin:8px 0;">'
                 )
                 in_bq = True
-            bq_content = re.sub(r'^>\s*', '', stripped)
-            processed_lines.append(bq_content)
+            processed.append(re.sub(r'^>\s*', '', stripped))
         else:
             if in_bq:
-                processed_lines.append('</blockquote>')
+                processed.append('</blockquote>')
                 in_bq = False
-            processed_lines.append(line)
+            processed.append(line)
     if in_bq:
-        processed_lines.append('</blockquote>')
-    result = '\n'.join(processed_lines)
+        processed.append('</blockquote>')
+    result = '\n'.join(processed)
 
-    # Маркированные списки — собираем в <ul>
+    # Списки
     result = _convert_lists_to_html(result)
 
-    # Нумерованные списки
     result = re.sub(
-        r'^[ \t]*\d+\.\s+(.+)$',
-        r'<li>\1</li>',
-        result,
-        flags=re.MULTILINE,
+        r'^\s*\d+\.\s+(.+)$', r'<li>\1</li>',
+        result, flags=re.MULTILINE,
     )
 
-    # ═══════════════════════════════════════════════
-    # 4. Переносы строк → <br>
-    # ═══════════════════════════════════════════════
+    # ─── 4. Переносы → <br> ─────────────────────
     result = result.replace('\n\n', '<br><br>')
     result = result.replace('\n', '<br>')
-
-    # Чистка множественных <br>
     result = re.sub(r'(<br>){3,}', '<br><br>', result)
 
-    # Убираем <br> внутри блочных тегов
-    result = re.sub(r'(</?(?:ul|ol|li|h[1-4]|blockquote|hr)>)<br>', r'\1', result)
-    result = re.sub(r'<br>(</?(?:ul|ol|li|h[1-4]|blockquote|hr)>)', r'\1', result)
+    block_tags = r'(?:ul|ol|li|h[1-4]|blockquote|hr|div|pre)'
+    result = re.sub(
+        rf'(</?{block_tags}[^>]*>)<br>', r'\1', result,
+    )
+    result = re.sub(
+        rf'<br>(</?{block_tags}[^>]*>)', r'\1', result,
+    )
 
-    # ═══════════════════════════════════════════════
-    # 5. Восстановление inline code
-    # ═══════════════════════════════════════════════
+    # ─── 5. Восстановление inline code ──────────
     for idx, code_text in enumerate(inline_codes):
-        escaped_code = escape_html(code_text)
+        escaped = escape_html(code_text)
         styled = (
-            f'<code style="background:#1e1e1e;padding:2px 6px;'
-            f'border-radius:4px;font-family:monospace;'
-            f'font-size:0.9em;">{escaped_code}</code>'
+            f'<code style="background:#272822;padding:2px 6px;'
+            f'border-radius:4px;'
+            f'font-family:Consolas,monospace;'
+            f'font-size:0.9em;">{escaped}</code>'
         )
         result = result.replace(f"\x00IC{idx}\x00", styled)
 
-    # ═══════════════════════════════════════════════
-    # 6. Восстановление fenced code blocks
-    # ═══════════════════════════════════════════════
+    # ─── 6. Восстановление code blocks ──────────
     for idx, (lang, code_content) in enumerate(code_blocks):
         formatted = format_code_for_anki(code_content, lang)
         result = result.replace(f"\x00CB{idx}\x00", formatted)
@@ -1236,42 +1242,27 @@ def format_markdown_to_anki_html(text: str) -> str:
 
 
 def _convert_lists_to_html(text: str) -> str:
-    """
-    Конвертирует маркированные списки Markdown в HTML <ul>/<li>.
-
-    Обрабатывает:
-    - Последовательные элементы: - item\\n- item
-    - С пустыми строками: - item\\n\\n- item
-    - С отступами: - item\\n  continuation
-    """
+    """Конвертирует маркированные списки Markdown в <ul>/<li>."""
     lines = text.split('\n')
     result_lines: List[str] = []
     in_list = False
 
     for line in lines:
         stripped = line.strip()
-
-        # Строка является элементом списка
         is_item = bool(re.match(r'^[-*]\s+', stripped))
 
         if is_item:
             if not in_list:
                 result_lines.append('<ul>')
                 in_list = True
-            item_content = re.sub(r'^[-*]\s+', '', stripped)
-            result_lines.append(f'<li>{item_content}</li>')
-
+            content = re.sub(r'^[-*]\s+', '', stripped)
+            result_lines.append(f'<li>{content}</li>')
         elif in_list and not stripped:
-            # Пустая строка внутри списка — пропускаем,
-            # но не закрываем список (может продолжиться)
             continue
-
-        elif in_list and stripped:
-            # Непустая строка, не элемент списка → закрываем список
+        elif in_list:
             result_lines.append('</ul>')
             in_list = False
             result_lines.append(line)
-
         else:
             result_lines.append(line)
 
