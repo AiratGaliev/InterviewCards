@@ -132,24 +132,35 @@ class FileValidationReport:
         lines = [f"=== {self.topic_name} ==="]
         lines.append(f"Файл: {self.file_path}")
         lines.append(f"Карточек найдено: {self.total_cards_found}")
-        lines.append(f"Смешение форматов: {'Да ⚠️' if self.has_mixed_formats else 'Нет ✅'}")
+        lines.append(
+            f"Смешение форматов: "
+            f"{'Да ⚠️' if self.has_mixed_formats else 'Нет ✅'}"
+        )
 
         if self.detected_formats:
             lines.append("Обнаруженные форматы:")
             for fmt, line_nums in self.detected_formats.items():
-                lines.append(f"  - {fmt}: строки {', '.join(map(str, line_nums[:10]))}"
-                             + (f" ...и ещё {len(line_nums) - 10}" if len(line_nums) > 10 else ""))
+                preview = ', '.join(map(str, line_nums[:10]))
+                extra = (
+                    f" ...и ещё {len(line_nums) - 10}"
+                    if len(line_nums) > 10 else ""
+                )
+                lines.append(f"  - {fmt}: строки {preview}{extra}")
 
         if self.issues:
             lines.append(f"\nПроблемы ({len(self.issues)}):")
             for issue in self.issues:
-                icon = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(issue.severity, "•")
-                lines.append(f"  {icon} Строка {issue.line_number}: {issue.message}")
+                icon = {
+                    "error": "❌", "warning": "⚠️", "info": "ℹ️"
+                }.get(issue.severity, "•")
+                lines.append(
+                    f"  {icon} Строка {issue.line_number}: {issue.message}"
+                )
                 if issue.line_text:
-                    display_text = issue.line_text[:120]
+                    display = issue.line_text[:120]
                     if len(issue.line_text) > 120:
-                        display_text += "…"
-                    lines.append(f"     │ {display_text}")
+                        display += "…"
+                    lines.append(f"     │ {display}")
                 if issue.suggestion:
                     lines.append(f"     └ Совет: {issue.suggestion}")
         else:
@@ -256,8 +267,7 @@ INCOMPATIBLE_PAIRS = [
 
 
 def validate_file_formats(file_path: str) -> FileValidationReport:
-    """Полная валидация одного Markdown-файла.
-    Проверяет смешение форматов, проблемные строки и т.д."""
+    """Полная валидация одного Markdown-файла."""
 
     topic_name = Path(file_path).stem
     report = FileValidationReport(
@@ -270,7 +280,9 @@ def validate_file_formats(file_path: str) -> FileValidationReport:
             content = f.read()
     except Exception as e:
         report.issues.append(FormatIssue(
-            severity='error', line_number=0, line_text='',
+            severity='error',
+            line_number=0,
+            line_text='',
             message=f"Не удалось прочитать файл: {e}",
         ))
         report.is_valid = False
@@ -278,141 +290,83 @@ def validate_file_formats(file_path: str) -> FileValidationReport:
 
     lines = content.splitlines()
 
-    # --- 1. Проверка frontmatter ---
+    # --- 1. Frontmatter ---
     _validate_frontmatter(content, lines, report)
 
-    # --- 2. Построчный анализ форматов ---
+    # --- 2. Построчный анализ ---
     in_code_block = False
     in_frontmatter = False
-    frontmatter_ended = False
-    all_formats_with_lines: Dict[str, List[int]] = {}
+    frontmatter_closed = False
+    all_formats: Dict[str, List[int]] = {}
 
-    for line_num_0, line in enumerate(lines):
-        line_num = line_num_0 + 1
+    for line_idx, line in enumerate(lines):
+        line_num = line_idx + 1
         stripped = line.strip()
 
         # Отслеживание frontmatter
-        if line_num_0 == 0 and stripped == '---':
+        if line_idx == 0 and stripped == '---':
             in_frontmatter = True
             continue
         if in_frontmatter:
             if stripped == '---':
                 in_frontmatter = False
-                frontmatter_ended = True
+                frontmatter_closed = True
             continue
 
         # Отслеживание блоков кода
         if stripped.startswith('```'):
             in_code_block = not in_code_block
-            # Проверка незакрытого блока кода в конце файла
             continue
         if in_code_block:
             continue
 
         # Определение формата строки
-        fmt = detect_line_format(stripped)
+        fmt = _detect_line_format_for_validation(stripped, False)
+
         if fmt:
-            if fmt not in all_formats_with_lines:
-                all_formats_with_lines[fmt] = []
-            all_formats_with_lines[fmt].append(line_num)
+            if fmt not in all_formats:
+                all_formats[fmt] = []
+            all_formats[fmt].append(line_num)
 
-        # --- Проверка проблемных строк ---
+        # --- Проверки конкретных форматов ---
 
-        # :: в начале или конце строки (пустой вопрос/ответ)
         if fmt == 'single_line_basic':
-            parts = stripped.split('::', 1)
-            if not parts[0].strip():
-                report.issues.append(FormatIssue(
-                    severity='error', line_number=line_num,
-                    line_text=stripped,
-                    message="Пустой вопрос перед разделителем '::'",
-                    suggestion="Добавьте текст вопроса перед '::'",
-                ))
-            if len(parts) > 1 and not parts[1].strip():
-                report.issues.append(FormatIssue(
-                    severity='warning', line_number=line_num,
-                    line_text=stripped,
-                    message="Пустой ответ после разделителя '::'",
-                    suggestion="Добавьте текст ответа после '::'",
-                ))
+            _check_single_line_basic(stripped, line_num, report)
 
-        if fmt == 'single_line_bidirectional':
-            parts = stripped.split(':::', 1)
-            if not parts[0].strip():
-                report.issues.append(FormatIssue(
-                    severity='error', line_number=line_num,
-                    line_text=stripped,
-                    message="Пустая сторона перед разделителем ':::'",
-                    suggestion="Добавьте текст перед ':::'",
-                ))
-            if len(parts) > 1 and not parts[1].strip():
-                report.issues.append(FormatIssue(
-                    severity='error', line_number=line_num,
-                    line_text=stripped,
-                    message="Пустая сторона после разделителя ':::'",
-                    suggestion="Добавьте текст после ':::'",
-                ))
+        elif fmt == 'single_line_bidirectional':
+            _check_single_line_bidirectional(stripped, line_num, report)
 
-        # Проверка незакрытых cloze
-        if '==' in stripped:
-            count = stripped.count('==')
-            if count % 2 != 0:
-                report.issues.append(FormatIssue(
-                    severity='warning', line_number=line_num,
-                    line_text=stripped,
-                    message="Нечётное количество '==' — возможно незакрытый cloze",
-                    suggestion="Проверьте, что каждый ==текст== имеет закрывающий ==",
-                ))
+        elif fmt in ('multi_line_basic_sep', 'multi_line_bidirectional_sep'):
+            _check_multiline_separator(
+                stripped, line_num, lines, line_idx, report,
+            )
 
-        # Одиночные ? и ?? — предупреждение, если следующая строка пуста
-        if stripped in ('?', '??'):
-            next_idx = line_num_0 + 1
-            if next_idx >= len(lines) or not lines[next_idx].strip():
-                report.issues.append(FormatIssue(
-                    severity='warning', line_number=line_num,
-                    line_text=stripped,
-                    message=f"Разделитель '{stripped}' без ответа на следующей строке",
-                    suggestion="Добавьте ответ после разделителя",
-                ))
-
-            # Проверка: есть ли вопрос ПЕРЕД разделителем?
-            prev_idx = line_num_0 - 1
-            while prev_idx >= 0 and not lines[prev_idx].strip():
-                prev_idx -= 1
-            if prev_idx < 0 or lines[prev_idx].strip().startswith('#') or lines[prev_idx].strip() == '---':
-                report.issues.append(FormatIssue(
-                    severity='warning', line_number=line_num,
-                    line_text=stripped,
-                    message=f"Разделитель '{stripped}' без вопроса перед ним",
-                    suggestion="Добавьте текст вопроса перед разделителем",
-                ))
-
-        # Множественные :: в одной строке (возможно ошибка)
-        if '::' in stripped and not stripped.startswith('#'):
-            double_colon_count = len(re.findall(r'(?<!:)::(?!:)', stripped))
-            triple_colon_count = len(re.findall(r':::', stripped))
-            if double_colon_count > 1 and triple_colon_count == 0:
-                report.issues.append(FormatIssue(
-                    severity='warning', line_number=line_num,
-                    line_text=stripped,
-                    message=f"Множественные '::' в одной строке ({double_colon_count} шт.) — "
-                            f"возможно нужно разбить на несколько карточек",
-                    suggestion="Каждая карточка должна быть на отдельной строке",
-                ))
+        # Проверка незакрытых cloze (для любой строки с ==)
+        _check_unclosed_cloze(stripped, line_num, report)
 
     # Проверка незакрытого блока кода
     if in_code_block:
         report.issues.append(FormatIssue(
-            severity='error', line_number=len(lines),
+            severity='error',
+            line_number=len(lines),
             line_text='',
-            message="Незакрытый блок кода (``` без парного закрывающего ```)",
+            message=(
+                "Незакрытый блок кода "
+                "(``` без парного закрывающего ```)"
+            ),
             suggestion="Добавьте закрывающий ``` в конце блока кода",
         ))
 
-    report.detected_formats = all_formats_with_lines
+    report.detected_formats = all_formats
 
-    # --- 3. Проверка смешения форматов ---
-    _check_format_mixing(all_formats_with_lines, report)
+    # --- 3. Смешение форматов на уровне файла ---
+    _check_format_mixing(all_formats, report)
+
+    # --- 3b. Смешение форматов внутри блоков ---
+    _check_cloze_with_separator_conflict(lines, report)
+
+    # --- 3c. Смешение cloze с :: и ::: ---
+    _check_inline_format_conflicts(lines, report)
 
     # --- 4. Подсчёт карточек ---
     try:
@@ -422,7 +376,7 @@ def validate_file_formats(file_path: str) -> FileValidationReport:
         report.total_cards_found = 0
 
     # --- 5. Дополнительные проверки ---
-    _check_empty_content(content, lines, report)
+    _check_empty_content(content, report)
     _check_very_long_lines(lines, report)
     _check_duplicate_questions(file_path, report)
 
@@ -441,17 +395,21 @@ def _validate_frontmatter(
 
     if not fm:
         report.issues.append(FormatIssue(
-            severity='info', line_number=1,
+            severity='info',
+            line_number=1,
             line_text='',
             message="Отсутствует frontmatter (---...---)",
-            suggestion="Добавьте frontmatter с тегами и категорией: "
-                       "tags: [flashcards/...], category: ...",
+            suggestion=(
+                "Добавьте frontmatter с тегами и категорией: "
+                "tags: [flashcards/...], category: ..."
+            ),
         ))
         return
 
     if 'tags' not in fm:
         report.issues.append(FormatIssue(
-            severity='warning', line_number=1,
+            severity='warning',
+            line_number=1,
             line_text='',
             message="Frontmatter без поля 'tags'",
             suggestion="Добавьте tags: [flashcards/category]",
@@ -459,23 +417,129 @@ def _validate_frontmatter(
 
     if 'category' not in fm and 'deck' not in fm:
         report.issues.append(FormatIssue(
-            severity='info', line_number=1,
+            severity='info',
+            line_number=1,
             line_text='',
-            message="Frontmatter без 'category' и 'deck' — "
-                    "будет использована категория из имени папки",
+            message=(
+                "Frontmatter без 'category' и 'deck' — "
+                "будет использована категория из имени папки"
+            ),
         ))
 
     tags = normalize_tags(fm.get('tags', []))
-    has_flashcards_tag = any(
-        t.startswith('flashcards') for t in tags
-    )
+    has_flashcards_tag = any(t.startswith('flashcards') for t in tags)
     if tags and not has_flashcards_tag:
         report.issues.append(FormatIssue(
-            severity='info', line_number=1,
+            severity='info',
+            line_number=1,
             line_text=f"tags: {fm.get('tags')}",
-            message="Нет тега flashcards/... — колода будет определена автоматически",
-            suggestion="Добавьте тег flashcards/<category> для явного указания колоды",
+            message=(
+                "Нет тега flashcards/... — "
+                "колода будет определена автоматически"
+            ),
+            suggestion=(
+                "Добавьте тег flashcards/<category> "
+                "для явного указания колоды"
+            ),
         ))
+
+
+def _detect_line_format_for_validation(
+        line: str,
+        in_code_block: bool,
+) -> Optional[str]:
+    """Определяет формат карточки в строке для целей валидации.
+
+    Возвращает строковый идентификатор формата или None.
+    Вызывается ТОЛЬКО для строк вне блоков кода и frontmatter.
+    """
+    stripped = line.strip()
+
+    if not stripped or in_code_block:
+        return None
+
+    # Пропускаем служебные строки
+    if stripped.startswith('```'):
+        return None
+    if stripped == '---':
+        return None
+
+    # Legacy формат — самый специфичный, проверяем первым
+    if re.match(r'^###\s*Вопрос:', stripped):
+        return 'legacy_question'
+
+    # Заголовки — не карточки
+    if stripped.startswith('#'):
+        return None
+
+    # Многострочные разделители — ТОЛЬКО если строка состоит
+    # ЦЕЛИКОМ из ? или ?? (с возможными пробелами)
+    if stripped == '??':
+        return 'multi_line_bidirectional_sep'
+    if stripped == '?':
+        return 'multi_line_basic_sep'
+
+    # Убираем inline-код перед проверкой :: и :::
+    # чтобы не ловить :: внутри `code`
+    text_no_inline_code = re.sub(r'`[^`]*`', '___CODE___', stripped)
+
+    # Bidirectional ::: — проверяем ДО basic ::
+    # Условие: ровно одно ::: в строке, обе стороны непустые
+    if ':::' in text_no_inline_code:
+        parts = text_no_inline_code.split(':::', 1)
+        if (len(parts) == 2
+                and parts[0].strip()
+                and parts[1].strip()
+                # Исключаем URL-подобные паттерны
+                and not re.search(r'https?://', stripped)):
+            return 'single_line_bidirectional'
+
+    # Basic :: — ровно одно :: (не :::), обе стороны непустые
+    if '::' in text_no_inline_code and ':::' not in text_no_inline_code:
+        parts = text_no_inline_code.split('::', 1)
+        if (len(parts) == 2
+                and parts[0].strip()
+                and parts[1].strip()
+                # Исключаем URL-порты (localhost::8080 и т.д.)
+                and not re.search(r'https?://', stripped)
+                and not re.search(r':\d+', parts[1].strip()[:5])):
+            return 'single_line_basic'
+
+    # Cloze — парные ==текст== (не оператор сравнения)
+    # Сначала убираем inline-код, потом ищем cloze
+    text_for_cloze = re.sub(r'`[^`]*`', '', stripped)
+    if re.search(r'==\S.*?\S==|==\S==', text_for_cloze):
+        return 'cloze'
+
+    return None
+
+
+# ──────────────────────────────────────
+#  Группы совместимости форматов
+# ──────────────────────────────────────
+
+# Форматы одного «направления» — basic (одностороннее)
+_BASIC_FORMATS = {'single_line_basic', 'multi_line_basic_sep', 'legacy_question'}
+
+# Форматы двустороннего типа
+_BIDI_FORMATS = {'single_line_bidirectional', 'multi_line_bidirectional_sep'}
+
+# Cloze — может сосуществовать с чем угодно
+_CLOZE_FORMATS = {'cloze'}
+
+# Пары, которые ДЕЙСТВИТЕЛЬНО несовместимы в одном файле
+_INCOMPATIBLE_PAIRS = [
+    # Basic и Bidirectional в одном файле — разные note types в Anki,
+    # но в Obsidian SR это допустимо. Предупреждаем мягко.
+    (
+        _BASIC_FORMATS, _BIDI_FORMATS,
+        "warning",
+        "Файл содержит и Basic (::/?), и Bidirectional (:::/??) карточки. "
+        "При экспорте в Anki они попадут в разные note types.",
+        "Это допустимо, но для порядка лучше разделить "
+        "на отдельные файлы по типу.",
+    ),
+]
 
 
 def _check_format_mixing(
@@ -484,62 +548,518 @@ def _check_format_mixing(
 ) -> None:
     """Проверяет смешение несовместимых форматов в файле."""
 
-    format_names = set(all_formats.keys())
+    found_formats = set(all_formats.keys())
 
-    # Исключаем cloze — он может сосуществовать с другими
-    qa_formats = format_names - {'cloze'}
+    # Убираем cloze из анализа — он всегда совместим
+    qa_formats = found_formats - _CLOZE_FORMATS
 
-    # Проверка несовместимых пар
-    for incompatible_set, message in INCOMPATIBLE_PAIRS:
-        found = incompatible_set & format_names
-        if len(found) >= 2:
+    if len(qa_formats) <= 1:
+        # 0 или 1 QA-формат — нет смешения
+        return
+
+    # Проверяем несовместимые пары
+    for group_a, group_b, severity, message, suggestion in _INCOMPATIBLE_PAIRS:
+        formats_in_a = qa_formats & group_a
+        formats_in_b = qa_formats & group_b
+
+        if formats_in_a and formats_in_b:
             report.has_mixed_formats = True
 
-            # Собираем строки каждого формата для отчёта
-            details_parts = []
-            for fmt in sorted(found):
-                fmt_lines = all_formats.get(fmt, [])
-                if fmt_lines:
-                    lines_str = ", ".join(str(ln) for ln in fmt_lines[:5])
-                    if len(fmt_lines) > 5:
-                        lines_str += f" ...+{len(fmt_lines) - 5}"
-                    details_parts.append(f"  '{fmt}' на строках: {lines_str}")
+            # Собираем строки для отчёта
+            detail_lines = []
+            for fmt in sorted(formats_in_a | formats_in_b):
+                fmt_line_nums = all_formats.get(fmt, [])
+                if fmt_line_nums:
+                    nums_str = ", ".join(str(n) for n in fmt_line_nums[:5])
+                    extra = (
+                        f" ...+{len(fmt_line_nums) - 5}"
+                        if len(fmt_line_nums) > 5 else ""
+                    )
+                    detail_lines.append(
+                        f"  '{fmt}' → строки: {nums_str}{extra}"
+                    )
+
+            # Находим первую проблемную строку
+            all_line_nums = []
+            for fmt in formats_in_a | formats_in_b:
+                all_line_nums.extend(all_formats.get(fmt, []))
+
+            first_line = min(all_line_nums) if all_line_nums else 1
 
             report.issues.append(FormatIssue(
-                severity='warning',
-                line_number=min(
-                    ln for fmt in found for ln in all_formats.get(fmt, [0])
-                ),
+                severity=severity,
+                line_number=first_line,
                 line_text='',
-                message=f"Смешение форматов: {message}",
-                suggestion="Используйте один формат карточек в файле или "
-                           "разделите на отдельные файлы.\n" +
-                           "\n".join(details_parts),
+                message=message,
+                suggestion=suggestion + "\n" + "\n".join(detail_lines),
             ))
 
-    # Общее предупреждение если > 2 разных QA-форматов
-    if len(qa_formats) > 2:
+    # Предупреждение о большом количестве разных форматов
+    # (больше 3 — скорее всего бардак)
+    if len(qa_formats) >= 3:
         report.has_mixed_formats = True
         report.issues.append(FormatIssue(
-            severity='warning', line_number=1,
+            severity='warning',
+            line_number=1,
             line_text='',
-            message=f"Используется {len(qa_formats)} различных форматов "
-                    f"карточек: {', '.join(sorted(qa_formats))}",
-            suggestion="Рекомендуется использовать 1-2 формата в одном файле "
-                       "для предсказуемого парсинга",
+            message=(
+                f"Используется {len(qa_formats)} различных "
+                f"QA-форматов: {', '.join(sorted(qa_formats))}"
+            ),
+            suggestion=(
+                "Рекомендуется 1-2 формата на файл "
+                "для предсказуемого парсинга"
+            ),
+        ))
+
+
+def _check_cloze_with_separator_conflict(
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет конфликт cloze-разметки с разделителями ? и ?? в одном блоке.
+
+    Ситуация: строка содержит ==cloze==, а следующая/предыдущая строка —
+    разделитель ? или ??. Парсер интерпретирует это как multi-line карточку,
+    а cloze-разметка теряется или обрабатывается неожиданно.
+    """
+    in_code_block = False
+    in_frontmatter = False
+
+    for line_idx, line in enumerate(lines):
+        line_num = line_idx + 1
+        stripped = line.strip()
+
+        # Пропуск frontmatter
+        if line_idx == 0 and stripped == '---':
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if stripped == '---':
+                in_frontmatter = False
+            continue
+
+        # Пропуск блоков кода
+        if stripped.startswith('```'):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+
+        # Ищем разделитель ? или ??
+        if stripped not in ('?', '??'):
+            continue
+
+        separator = stripped
+
+        # Собираем блок «вопроса» (строки выше разделителя до пустой строки)
+        question_lines = []
+        check_idx = line_idx - 1
+        while check_idx >= 0:
+            prev_line = lines[check_idx].strip()
+            if not prev_line:
+                break
+            if prev_line == '---':
+                break
+            if prev_line.startswith('#'):
+                break
+            question_lines.insert(0, (check_idx + 1, prev_line))
+            check_idx -= 1
+
+        # Собираем блок «ответа» (строки ниже разделителя до пустой строки)
+        answer_lines = []
+        check_idx = line_idx + 1
+        while check_idx < len(lines):
+            next_line = lines[check_idx].strip()
+            if not next_line:
+                break
+            if next_line == '---':
+                break
+            if next_line.startswith('#'):
+                break
+            answer_lines.insert(len(answer_lines), (check_idx + 1, next_line))
+            check_idx += 1
+
+        # Проверяем: есть ли ==cloze== в вопросе или ответе
+        # (убираем inline-код из проверки)
+        for block_line_num, block_line in question_lines + answer_lines:
+            text_no_code = re.sub(r'`[^`]*`', '', block_line)
+            if re.search(r'==(?=\S).+?(?<=\S)==', text_no_code):
+                report.issues.append(FormatIssue(
+                    severity='warning',
+                    line_number=block_line_num,
+                    line_text=block_line,
+                    message=(
+                        f"Cloze-разметка (==...==) в блоке "
+                        f"с разделителем '{separator}' (строка {line_num}). "
+                        f"Парсер обработает это как multi-line карточку, "
+                        f"а не как cloze-пропуск."
+                    ),
+                    suggestion=(
+                        "Если нужна cloze-карточка — уберите разделитель "
+                        f"'{separator}' и оставьте только текст с ==...==. "
+                        "Если нужна Q&A карточка — уберите == из текста."
+                    ),
+                ))
+
+        # Проверяем: есть ли :: или ::: в вопросе
+        for block_line_num, block_line in question_lines:
+            text_no_code = re.sub(r'`[^`]*`', '', block_line)
+            if ':::' in text_no_code:
+                parts = text_no_code.split(':::', 1)
+                if parts[0].strip() and parts[1].strip():
+                    report.issues.append(FormatIssue(
+                        severity='warning',
+                        line_number=block_line_num,
+                        line_text=block_line,
+                        message=(
+                            f"Bidirectional-разметка (:::) в блоке "
+                            f"с разделителем '{separator}' (строка {line_num}). "
+                            f"Неоднозначность: парсер может обработать "
+                            f"как ::: или как '{separator}'."
+                        ),
+                        suggestion=(
+                            "Используйте только один формат: "
+                            "либо ::: (однострочный), либо "
+                            f"'{separator}' (многострочный)."
+                        ),
+                    ))
+            elif '::' in text_no_code and ':::' not in text_no_code:
+                parts = text_no_code.split('::', 1)
+                if parts[0].strip() and parts[1].strip():
+                    report.issues.append(FormatIssue(
+                        severity='warning',
+                        line_number=block_line_num,
+                        line_text=block_line,
+                        message=(
+                            f"Basic-разметка (::) в блоке "
+                            f"с разделителем '{separator}' (строка {line_num}). "
+                            f"Неоднозначность формата."
+                        ),
+                        suggestion=(
+                            "Используйте только один формат: "
+                            "либо :: (однострочный), либо "
+                            f"'{separator}' (многострочный)."
+                        ),
+                    ))
+
+
+def _check_inline_format_conflicts(
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет конфликт cloze-разметки внутри :: и ::: карточек.
+
+    Ситуация: строка содержит :: или ::: (single-line карточка),
+    но в вопросе или ответе есть ==cloze==. Парсер обработает это
+    как basic/bidirectional карточку, cloze может быть потерян
+    или обработан неожиданно.
+    """
+    in_code_block = False
+    in_frontmatter = False
+
+    for line_idx, line in enumerate(lines):
+        line_num = line_idx + 1
+        stripped = line.strip()
+
+        # Пропуск frontmatter
+        if line_idx == 0 and stripped == '---':
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if stripped == '---':
+                in_frontmatter = False
+            continue
+
+        # Пропуск блоков кода
+        if stripped.startswith('```'):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+
+        # Пропуск заголовков и служебных строк
+        if not stripped or stripped.startswith('#') or stripped == '---':
+            continue
+
+        # Убираем inline-код для анализа
+        text_no_code = re.sub(r'`[^`]*`', '', stripped)
+
+        # --- Проверка ::: (bidirectional) ---
+        if ':::' in text_no_code:
+            parts = text_no_code.split(':::', 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                # Проверяем обе стороны на cloze
+                for side_idx, side in enumerate(parts):
+                    if re.search(r'==(?=\S).+?(?<=\S)==', side):
+                        side_name = "первой" if side_idx == 0 else "второй"
+                        report.issues.append(FormatIssue(
+                            severity='warning',
+                            line_number=line_num,
+                            line_text=stripped,
+                            message=(
+                                f"Cloze-разметка (==...==) в {side_name} "
+                                f"части Bidirectional-карточки (:::). "
+                                f"Парсер создаст двустороннюю карточку, "
+                                f"cloze-пропуски не будут обработаны как Cloze-тип."
+                            ),
+                            suggestion=(
+                                "Если нужна cloze-карточка — уберите ::: "
+                                "и оставьте текст с ==...== на отдельной строке. "
+                                "Если нужна bidirectional — уберите == из текста."
+                            ),
+                        ))
+                        break  # одного предупреждения на строку достаточно
+                continue
+
+        # --- Проверка :: (basic) ---
+        if '::' in text_no_code and ':::' not in text_no_code:
+            parts = text_no_code.split('::', 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                question_part = parts[0]
+                answer_part = parts[1]
+
+                # Cloze в ответе — наиболее частый случай
+                if re.search(r'==(?=\S).+?(?<=\S)==', answer_part):
+                    report.issues.append(FormatIssue(
+                        severity='warning',
+                        line_number=line_num,
+                        line_text=stripped,
+                        message=(
+                            "Cloze-разметка (==...==) в ответе "
+                            "Basic-карточки (::). "
+                            "Парсер может обработать это как Basic, "
+                            "а cloze-пропуски будут потеряны."
+                        ),
+                        suggestion=(
+                            "Если нужна cloze-карточка — уберите :: "
+                            "и оставьте текст с ==...== как отдельный блок. "
+                            "Если нужна Q&A карточка — уберите == из ответа. "
+                            "Допустимо: парсер конвертирует cloze в ответе, "
+                            "но вопрос будет проигнорирован."
+                        ),
+                    ))
+
+                # Cloze в вопросе — редкий, но проблемный случай
+                elif re.search(r'==(?=\S).+?(?<=\S)==', question_part):
+                    report.issues.append(FormatIssue(
+                        severity='warning',
+                        line_number=line_num,
+                        line_text=stripped,
+                        message=(
+                            "Cloze-разметка (==...==) в вопросе "
+                            "Basic-карточки (::). "
+                            "Неоднозначность: это Q&A или Cloze?"
+                        ),
+                        suggestion=(
+                            "Если нужна cloze — уберите :: и оставьте "
+                            "текст с ==...== как отдельный блок. "
+                            "Если нужна Q&A — уберите == из вопроса."
+                        ),
+                    ))
+
+
+def _check_unclosed_cloze(
+        stripped: str,
+        line_num: int,
+        report: FileValidationReport,
+) -> None:
+    """Проверяет строку на незакрытые cloze-пропуски.
+
+    Не срабатывает на операторы == в коде или тексте.
+    """
+    if '==' not in stripped:
+        return
+
+    # 1. Убираем inline-код — внутри него == это оператор
+    text = re.sub(r'`[^`]*`', '', stripped)
+
+    if '==' not in text:
+        return
+
+    # 2. Убираем тройные === (оператор строгого равенства JS/TS)
+    text = text.replace('===', ' ')
+    # Убираем !== и подобные
+    text = re.sub(r'!==?', ' ', text)
+
+    # 3. Убираем == окружённые пробелами (оператор сравнения)
+    #    Включая начало/конец строки
+    text = re.sub(r'(?:^|(?<=\s))==(?=\s|$)', ' ', text)
+    text = re.sub(r'(?:^|(?<=\s))==(?=[,;)\]?!.])', ' ', text)
+
+    if '==' not in text:
+        return
+
+    # 4. Убираем все корректные парные cloze ==текст==
+    #    Ключевой паттерн: == + любые символы (не жадно) + ==
+    #    Условие: первый символ после == не пробел,
+    #             последний символ перед == не пробел
+    #    Обрабатываем также однобуквенные ==x==
+    text_cleaned = re.sub(r'==(?=\S)(.+?)(?<=\S)==', '', text)
+
+    # 5. Если остались == — потенциальная проблема
+    if '==' in text_cleaned:
+        report.issues.append(FormatIssue(
+            severity='warning',
+            line_number=line_num,
+            line_text=stripped,
+            message="Возможно незакрытый cloze-пропуск",
+            suggestion=(
+                "Проверьте парность ==текст==. "
+                "Если == — оператор сравнения, "
+                "оберните выражение в `inline code`."
+            ),
+        ))
+
+
+def _check_single_line_basic(
+        stripped: str,
+        line_num: int,
+        report: FileValidationReport,
+) -> None:
+    """Проверяет корректность single-line basic карточки (::)."""
+
+    # Убираем inline-код для корректного split
+    text_no_code = re.sub(r'`[^`]*`', '___CODE___', stripped)
+
+    if ':::' in text_no_code:
+        return  # Это bidirectional, не basic
+
+    parts = text_no_code.split('::', 1)
+    if len(parts) != 2:
+        return
+
+    question_part = parts[0].strip()
+    answer_part = parts[1].strip()
+
+    if not question_part:
+        report.issues.append(FormatIssue(
+            severity='error',
+            line_number=line_num,
+            line_text=stripped,
+            message="Пустой вопрос перед разделителем '::'",
+            suggestion="Добавьте текст вопроса перед '::'",
+        ))
+
+    if not answer_part:
+        report.issues.append(FormatIssue(
+            severity='warning',
+            line_number=line_num,
+            line_text=stripped,
+            message="Пустой ответ после разделителя '::'",
+            suggestion="Добавьте текст ответа после '::'",
+        ))
+
+    # Множественные :: в одной строке (возможно нужно разбить)
+    double_colon_count = len(re.findall(r'(?<!:)::(?!:)', text_no_code))
+    if double_colon_count > 1:
+        report.issues.append(FormatIssue(
+            severity='warning',
+            line_number=line_num,
+            line_text=stripped,
+            message=(
+                f"Множественные '::' в одной строке "
+                f"({double_colon_count} шт.)"
+            ),
+            suggestion="Каждая карточка должна быть на отдельной строке",
+        ))
+
+
+def _check_single_line_bidirectional(
+        stripped: str,
+        line_num: int,
+        report: FileValidationReport,
+) -> None:
+    """Проверяет корректность single-line bidirectional карточки (:::)."""
+
+    text_no_code = re.sub(r'`[^`]*`', '___CODE___', stripped)
+    parts = text_no_code.split(':::', 1)
+
+    if len(parts) != 2:
+        return
+
+    if not parts[0].strip():
+        report.issues.append(FormatIssue(
+            severity='error',
+            line_number=line_num,
+            line_text=stripped,
+            message="Пустая сторона перед разделителем ':::'",
+            suggestion="Добавьте текст перед ':::'",
+        ))
+
+    if not parts[1].strip():
+        report.issues.append(FormatIssue(
+            severity='error',
+            line_number=line_num,
+            line_text=stripped,
+            message="Пустая сторона после разделителя ':::'",
+            suggestion="Добавьте текст после ':::'",
+        ))
+
+
+def _check_multiline_separator(
+        stripped: str,
+        line_num: int,
+        lines: List[str],
+        line_idx: int,
+        report: FileValidationReport,
+) -> None:
+    """Проверяет корректность разделителя ? или ??."""
+
+    # Проверяем ответ после разделителя
+    next_idx = line_idx + 1
+    has_answer = False
+    while next_idx < len(lines):
+        next_line = lines[next_idx].strip()
+        if next_line:
+            has_answer = True
+            break
+        next_idx += 1
+
+    if not has_answer:
+        report.issues.append(FormatIssue(
+            severity='warning',
+            line_number=line_num,
+            line_text=stripped,
+            message=f"Разделитель '{stripped}' без ответа после него",
+            suggestion="Добавьте ответ после разделителя",
+        ))
+
+    # Проверяем вопрос перед разделителем
+    prev_idx = line_idx - 1
+    has_question = False
+    while prev_idx >= 0:
+        prev_line = lines[prev_idx].strip()
+        if not prev_line:
+            prev_idx -= 1
+            continue
+        # Если предыдущая непустая строка — заголовок или ---,
+        # то вопроса нет
+        if prev_line.startswith('#') or prev_line == '---':
+            break
+        has_question = True
+        break
+
+    if not has_question:
+        report.issues.append(FormatIssue(
+            severity='warning',
+            line_number=line_num,
+            line_text=stripped,
+            message=f"Разделитель '{stripped}' без вопроса перед ним",
+            suggestion="Добавьте текст вопроса перед разделителем",
         ))
 
 
 def _check_empty_content(
         content: str,
-        lines: List[str],
         report: FileValidationReport,
 ) -> None:
     """Проверка на пустое содержимое."""
     content_without_fm = strip_frontmatter(content).strip()
     if not content_without_fm:
         report.issues.append(FormatIssue(
-            severity='error', line_number=1,
+            severity='error',
+            line_number=1,
             line_text='',
             message="Файл не содержит контента (только frontmatter)",
             suggestion="Добавьте карточки после frontmatter",
@@ -547,11 +1067,14 @@ def _check_empty_content(
 
     if not validate_markdown_structure(content):
         report.issues.append(FormatIssue(
-            severity='warning', line_number=1,
+            severity='warning',
+            line_number=1,
             line_text='',
             message="Не найдено распознаваемых форматов карточек",
-            suggestion="Используйте :: для Basic, ::: для Bidirectional, "
-                       "? / ?? для многострочных, == для Cloze",
+            suggestion=(
+                "Используйте :: для Basic, ::: для Bidirectional, "
+                "? / ?? для многострочных, == для Cloze"
+            ),
         ))
 
 
@@ -573,9 +1096,13 @@ def _check_very_long_lines(
                 severity='info',
                 line_number=i + 1,
                 line_text=line[:100] + '…',
-                message=f"Очень длинная строка ({len(line)} символов) — "
-                        f"может быть сложно редактировать",
-                suggestion="Рассмотрите разбивку на многострочный формат (? или ??)",
+                message=(
+                    f"Очень длинная строка ({len(line)} символов)"
+                ),
+                suggestion=(
+                    "Рассмотрите разбивку "
+                    "на многострочный формат (? или ??)"
+                ),
             ))
 
 
@@ -592,13 +1119,18 @@ def _check_duplicate_questions(
     seen: Dict[str, int] = {}
     for card in cards:
         key = normalize_text_key(card.question)
+        if not key:
+            continue
         if key in seen:
             report.issues.append(FormatIssue(
                 severity='warning',
                 line_number=0,
                 line_text=card.question[:100],
-                message=f"Дубликат вопроса: '{card.question[:60]}…' "
-                        f"(уже встречался как карточка #{seen[key]})",
+                message=(
+                    f"Дубликат вопроса: "
+                    f"'{card.question[:60]}…' "
+                    f"(карточка #{seen[key]})"
+                ),
                 suggestion="Удалите дублирующуюся карточку",
             ))
         else:
@@ -620,7 +1152,9 @@ def validate_all_files(input_dir: str) -> List[FileValidationReport]:
     return reports
 
 
-def generate_validation_report_text(reports: List[FileValidationReport]) -> str:
+def generate_validation_report_text(
+        reports: List[FileValidationReport],
+) -> str:
     """Генерирует текстовый отчёт валидации."""
     lines = [
         "=" * 60,
@@ -641,7 +1175,6 @@ def generate_validation_report_text(reports: List[FileValidationReport]) -> str:
     lines.append(f"Файлов со смешением форматов: {mixed_count}")
     lines.append("")
 
-    # Сначала файлы с проблемами
     problem_reports = [r for r in reports if r.issues]
     clean_reports = [r for r in reports if not r.issues]
 
