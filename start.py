@@ -1,8 +1,3 @@
-"""
-Streamlit UI приложения InterviewCards.
-Генератор карточек Spaced Repetition из Markdown.
-"""
-
 import io
 import os
 import traceback
@@ -12,13 +7,16 @@ import streamlit as st
 
 from config.Config import get_config
 from logic.core import CardGenerator, GenerationResult
-from logic.utils import load_markdown_topics, parse_cards_from_markdown
+from logic.utils import (
+    load_markdown_topics,
+    parse_cards_from_markdown,
+    validate_all_files,
+    generate_validation_report_text,
+    search_cards,
+    compute_deck_statistics,
+)
 from models.InterviewCard import CardType
 from ui.settings import UserSettings
-
-# =============================================================================
-# Константы
-# =============================================================================
 
 EXPORT_FORMATS = {
     "both": "📦 Оба формата (Obsidian + Anki)",
@@ -42,15 +40,16 @@ CARD_TYPE_EMOJI = {
     CardType.CLOZE: "🟠",
 }
 
-APP_VERSION = "2.0"
+SEVERITY_EMOJI = {
+    'error': '❌',
+    'warning': '⚠️',
+    'info': 'ℹ️',
+}
 
+APP_VERSION = "2.1"
 
-# =============================================================================
-# Инициализация и управление состоянием
-# =============================================================================
 
 def init_session_state(config, settings: UserSettings):
-    """Инициализирует состояние сессии из сохранённых настроек."""
     defaults = {
         'export_format': settings.export_format,
         'use_reverse_cards': settings.use_reverse_cards,
@@ -59,18 +58,17 @@ def init_session_state(config, settings: UserSettings):
         'generated_files': [],
         'generation_complete': False,
         'last_result': None,
+        'search_query': '',
     }
 
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-    # input_dir: приоритет сохранённых → конфиг
     if 'input_dir' not in st.session_state:
         saved_dir = settings.input_dir or settings.last_input_dir
         st.session_state['input_dir'] = saved_dir or config.materials_source
 
-    # selected_categories: валидируем против текущего конфига
     if 'selected_categories' not in st.session_state:
         saved = settings.selected_categories
         valid = [c for c in saved if c in config.categories]
@@ -80,7 +78,6 @@ def init_session_state(config, settings: UserSettings):
 
 
 def collect_current_settings() -> UserSettings:
-    """Собирает текущие настройки из session_state."""
     return UserSettings(
         input_dir=st.session_state.get('input_dir', ''),
         selected_categories=st.session_state.get(
@@ -95,37 +92,30 @@ def collect_current_settings() -> UserSettings:
 
 
 def save_current_settings() -> bool:
-    """Сохраняет текущие настройки в файл."""
     settings = collect_current_settings()
     return settings.save()
 
 
 def reset_generation_state():
-    """Сбрасывает состояние генерации."""
     st.session_state['generated_files'] = []
     st.session_state['generation_complete'] = False
     st.session_state['last_result'] = None
 
 
 def reset_all_settings():
-    """Сбрасывает все настройки к значениям по умолчанию."""
     UserSettings().save()
     keys_to_clear = [
         'input_dir', 'selected_categories', 'export_format',
         'use_reverse_cards', 'clean_duplicates', 'preview_length',
         'generated_files', 'generation_complete', 'last_result',
+        'search_query',
     ]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
 
 
-# =============================================================================
-# Вспомогательные функции
-# =============================================================================
-
 def create_zip_from_files(file_paths: list) -> io.BytesIO:
-    """Создаёт ZIP-архив из списка файлов."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for fp in file_paths:
@@ -136,7 +126,6 @@ def create_zip_from_files(file_paths: list) -> io.BytesIO:
 
 
 def get_file_size_str(file_path: str) -> str:
-    """Возвращает читаемый размер файла."""
     try:
         size = os.path.getsize(file_path)
         if size > 1024 * 1024:
@@ -149,7 +138,6 @@ def get_file_size_str(file_path: str) -> str:
 
 
 def count_data_lines(file_path: str) -> int:
-    """Считает строки данных (без заголовков) в файле Anki."""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             return sum(
@@ -160,16 +148,10 @@ def count_data_lines(file_path: str) -> int:
         return 0
 
 
-# =============================================================================
-# Боковая панель
-# =============================================================================
-
 def render_sidebar(config, generator: CardGenerator):
-    """Отрисовывает боковую панель с настройками."""
     with st.sidebar:
         st.header("⚙️ Настройки")
 
-        # ─── Путь к материалам ───────────────────────
         st.text_input(
             "📁 Путь к материалам",
             key="input_dir",
@@ -203,7 +185,6 @@ def render_sidebar(config, generator: CardGenerator):
 
         st.divider()
 
-        # ─── Категории ───────────────────────────────
         st.multiselect(
             "🏷️ Категории",
             options=config.categories,
@@ -211,7 +192,6 @@ def render_sidebar(config, generator: CardGenerator):
             help="Фильтр по категориям материалов",
         )
 
-        # ─── Формат экспорта ─────────────────────────
         st.radio(
             "📤 Формат экспорта",
             options=list(EXPORT_FORMATS.keys()),
@@ -224,7 +204,6 @@ def render_sidebar(config, generator: CardGenerator):
             ),
         )
 
-        # ─── Опции ───────────────────────────────────
         col1, col2 = st.columns(2)
         with col1:
             st.checkbox(
@@ -241,7 +220,6 @@ def render_sidebar(config, generator: CardGenerator):
 
         st.divider()
 
-        # ─── Управление настройками ──────────────────
         col1, col2 = st.columns(2)
         with col1:
             if st.button(
@@ -263,7 +241,6 @@ def render_sidebar(config, generator: CardGenerator):
                 reset_all_settings()
                 st.rerun()
 
-        # ─── Информация о путях ──────────────────────
         with st.expander("📂 Пути вывода", expanded=False):
             paths = generator.get_output_paths()
             st.caption(f"**Vault:** `{paths['obsidian_vault']}`")
@@ -271,7 +248,6 @@ def render_sidebar(config, generator: CardGenerator):
             st.caption(f"**Материалы:** `{paths['materials']}`")
             st.caption(f"**Anki:** `{paths['anki']}`")
 
-        # ─── Информация о настройках ─────────────────
         saved_path = UserSettings.get_settings_path()
         if os.path.exists(saved_path):
             settings = UserSettings.load(saved_path)
@@ -279,12 +255,7 @@ def render_sidebar(config, generator: CardGenerator):
                 st.caption(f"💾 Сохранено: {settings.last_saved}")
 
 
-# =============================================================================
-# Вкладка: Темы
-# =============================================================================
-
 def render_tab_topics(generator: CardGenerator):
-    """Отрисовывает вкладку обзора тем и карточек."""
     input_dir = st.session_state['input_dir']
     selected_categories = st.session_state.get('selected_categories', [])
 
@@ -305,7 +276,6 @@ def render_tab_topics(generator: CardGenerator):
         )
         return
 
-    # ─── Фильтрация по выбранным категориям ──────
     if selected_categories:
         filtered_topics = {
             name: data for name, data in topics.items()
@@ -314,7 +284,6 @@ def render_tab_topics(generator: CardGenerator):
     else:
         filtered_topics = topics
 
-    # ─── Заголовок с счётчиком ───────────────────
     total_count = len(topics)
     filtered_count = len(filtered_topics)
 
@@ -338,7 +307,6 @@ def render_tab_topics(generator: CardGenerator):
             "или добавьте материалы с нужными категориями"
         )
 
-        # Показываем какие категории есть в файлах
         existing_categories = sorted(set(
             data.get('category', 'general')
             for data in topics.values()
@@ -350,7 +318,6 @@ def render_tab_topics(generator: CardGenerator):
             )
         return
 
-    # ─── Таблица тем ─────────────────────────────
     table_data = []
     for name, data in filtered_topics.items():
         cards = parse_cards_from_markdown(data['path'])
@@ -364,8 +331,12 @@ def render_tab_topics(generator: CardGenerator):
             f"{count}× {label}" for label, count in type_counts.items()
         )
 
+        # Быстрая проверка смешения форматов
+        has_mix = len(type_counts) > 2
+        mix_indicator = " ⚠️" if has_mix else ""
+
         table_data.append({
-            "Тема": name,
+            "Тема": name + mix_indicator,
             "Категория": data.get('category', 'general'),
             "Карточек": len(cards),
             "Колода": data.get('deck_name', ''),
@@ -385,7 +356,6 @@ def render_tab_topics(generator: CardGenerator):
         },
     )
 
-    # ─── Сводная статистика по фильтру ───────────
     total_cards = sum(row["Карточек"] for row in table_data)
     categories_in_view = sorted(set(
         row["Категория"] for row in table_data
@@ -398,12 +368,71 @@ def render_tab_topics(generator: CardGenerator):
 
     st.divider()
 
-    # ─── Предпросмотр темы ───────────────────────
+    # --- Поиск по карточкам ---
+    st.markdown("### 🔎 Поиск по карточкам")
+
+    search_col1, search_col2 = st.columns([3, 1])
+    with search_col1:
+        search_query = st.text_input(
+            "Поиск",
+            key="search_query",
+            placeholder="Введите текст для поиска...",
+            label_visibility="collapsed",
+        )
+    with search_col2:
+        search_in = st.selectbox(
+            "Искать в",
+            ["Везде", "Вопросах", "Ответах"],
+            key="search_scope",
+            label_visibility="collapsed",
+        )
+
+    if search_query and search_query.strip():
+        all_cards_for_search = []
+        for name, data in filtered_topics.items():
+            cards = parse_cards_from_markdown(data['path'])
+            all_cards_for_search.extend(cards)
+
+        search_in_q = search_in in ("Везде", "Вопросах")
+        search_in_a = search_in in ("Везде", "Ответах")
+
+        found_cards = search_cards(
+            all_cards_for_search,
+            search_query,
+            search_in_answers=search_in_a,
+            search_in_questions=search_in_q,
+        )
+
+        if found_cards:
+            st.success(f"Найдено: {len(found_cards)} карточек")
+            for i, card in enumerate(found_cards[:20]):
+                emoji = CARD_TYPE_EMOJI.get(card.card_type, "⚪")
+                title = card.question[:80] + ("…" if len(card.question) > 80 else "")
+                with st.expander(f"{emoji} {title} [{card.topic}]", expanded=False):
+                    col_f, col_b = st.columns(2)
+                    with col_f:
+                        st.markdown("**Front:**")
+                        # Подсветка найденного текста
+                        q_display = card.question[:500]
+                        st.markdown(f"> {q_display}")
+                    with col_b:
+                        st.markdown("**Back:**")
+                        a_display = card.answer[:500]
+                        st.markdown(f"> {a_display}")
+                    st.caption(f"Тема: {card.topic} · Тип: {CARD_TYPE_LABELS.get(card.card_type, '?')}")
+
+            if len(found_cards) > 20:
+                st.info(f"Показано 20 из {len(found_cards)} результатов")
+        else:
+            st.info(f"Ничего не найдено по запросу: «{search_query}»")
+
+        st.divider()
+
+    # --- Предпросмотр темы ---
     st.markdown("### 🔍 Предпросмотр темы")
 
     topic_names = list(filtered_topics.keys())
 
-    # Сбрасываем выбор если текущая тема не в фильтре
     current_preview = st.session_state.get('preview_topic', '')
     default_idx = 0
     if current_preview in topic_names:
@@ -421,7 +450,6 @@ def render_tab_topics(generator: CardGenerator):
 
     topic_data = filtered_topics[selected_topic]
 
-    # Метаданные темы
     col_cat, col_deck = st.columns(2)
     col_cat.caption(
         f"🏷️ Категория: **{topic_data.get('category', 'general')}**"
@@ -430,7 +458,6 @@ def render_tab_topics(generator: CardGenerator):
         f"📦 Колода: **{topic_data.get('deck_name', '')}**"
     )
 
-    # Содержимое файла
     with st.expander("📄 Markdown содержимое", expanded=False):
         content = topic_data['content']
         preview_len = st.session_state.get('preview_length', 1500)
@@ -446,14 +473,12 @@ def render_tab_topics(generator: CardGenerator):
         else:
             st.code(content, language="markdown")
 
-    # Карточки
     cards = parse_cards_from_markdown(topic_data['path'])
 
     if not cards:
         st.warning("Карточки не найдены в этой теме")
         return
 
-    # Метрики
     col1, col2, col3 = st.columns(3)
     col1.metric("Всего карточек", len(cards))
 
@@ -463,7 +488,15 @@ def render_tab_topics(generator: CardGenerator):
     reverse_count = sum(1 for c in cards if c.is_reverse)
     col3.metric("Обратных", reverse_count)
 
-    # Фильтр по типу карточки внутри темы
+    # --- Предупреждение о смешении форматов (inline) ---
+    if len(unique_types) > 2:
+        st.warning(
+            f"⚠️ В этой теме используется {len(unique_types)} типов карточек. "
+            f"Это может привести к неожиданному парсингу. "
+            f"Рекомендуется использовать 1-2 типа на файл. "
+            f"Подробности — на вкладке **🔍 Валидация**."
+        )
+
     all_types_in_topic = sorted(
         set(c.card_type for c in cards),
         key=lambda t: t.value,
@@ -483,7 +516,6 @@ def render_tab_topics(generator: CardGenerator):
         if type_filter:
             cards = [c for c in cards if c.card_type in type_filter]
 
-    # Список карточек
     st.markdown(f"#### Карточки ({len(cards)})")
 
     for i, card in enumerate(cards):
@@ -492,7 +524,6 @@ def render_tab_topics(generator: CardGenerator):
             card.card_type, card.card_type.value
         )
 
-        # Короткий заголовок
         title_text = card.question[:100]
         if len(card.question) > 100:
             title_text += "…"
@@ -503,7 +534,6 @@ def render_tab_topics(generator: CardGenerator):
                 f"{emoji} #{i + 1} {title_text}",
                 expanded=(i == 0),
         ):
-            # Метаданные
             meta_parts = [f"**Тип:** {label}"]
             if card.is_reverse:
                 meta_parts.append("**Reverse:** Да")
@@ -513,7 +543,6 @@ def render_tab_topics(generator: CardGenerator):
                 )
             st.caption(" · ".join(meta_parts))
 
-            # Front / Back
             col_f, col_b = st.columns(2)
 
             with col_f:
@@ -530,26 +559,284 @@ def render_tab_topics(generator: CardGenerator):
                     answer_preview += "…"
                 st.markdown(f"> {answer_preview}")
 
-            # Код
             if card.code_snippets:
                 st.markdown(
                     f"**Код:** {len(card.code_snippets)} фрагмент(ов)"
                 )
 
 
-# =============================================================================
-# Вкладка: Генерация
-# =============================================================================
+def render_tab_validation():
+    """Вкладка валидации материалов."""
+    input_dir = st.session_state.get('input_dir', '')
+
+    st.markdown("### 🔍 Валидация материалов")
+    st.caption(
+        "Проверка файлов на ошибки формата, смешение типов карточек, "
+        "и другие потенциальные проблемы"
+    )
+
+    if not os.path.exists(input_dir):
+        st.info("📁 Укажите путь к папке с материалами в боковой панели")
+        return
+
+    if st.button("🔍 Запустить валидацию", type="primary", use_container_width=True):
+        with st.spinner("Проверка файлов..."):
+            reports = validate_all_files(input_dir)
+            st.session_state['validation_reports'] = reports
+
+    reports = st.session_state.get('validation_reports', None)
+    if reports is None:
+        st.info("Нажмите кнопку выше для запуска валидации")
+        return
+
+    if not reports:
+        st.warning("Нет файлов для валидации")
+        return
+
+    # --- Сводка ---
+    total_errors = sum(r.error_count for r in reports)
+    total_warnings = sum(r.warning_count for r in reports)
+    total_info = sum(r.info_count for r in reports)
+    mixed_count = sum(1 for r in reports if r.has_mixed_formats)
+    clean_count = sum(1 for r in reports if not r.issues)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("📄 Файлов", len(reports))
+    col2.metric("❌ Ошибок", total_errors)
+    col3.metric("⚠️ Предупр.", total_warnings)
+    col4.metric("🔀 Смешение", mixed_count)
+    col5.metric("✅ Чистых", clean_count)
+
+    if total_errors == 0 and total_warnings == 0:
+        st.success("✅ Все файлы прошли проверку без ошибок и предупреждений!")
+    elif total_errors > 0:
+        st.error(
+            f"Найдено {total_errors} ошибок в {sum(1 for r in reports if r.error_count > 0)} файлах. "
+            f"Эти проблемы могут привести к потере карточек при генерации."
+        )
+
+    if mixed_count > 0:
+        st.warning(
+            f"⚠️ В {mixed_count} файлах обнаружено смешение форматов карточек. "
+            f"Это может привести к неожиданному разбору — рекомендуется "
+            f"использовать один формат на файл."
+        )
+
+    # --- Скачивание отчёта ---
+    report_text = generate_validation_report_text(reports)
+    st.download_button(
+        "📥 Скачать отчёт валидации",
+        data=report_text,
+        file_name="validation_report.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    # --- Фильтр отображения ---
+    show_filter = st.radio(
+        "Показать",
+        ["Все файлы", "Только с проблемами", "Только со смешением форматов"],
+        horizontal=True,
+        key="validation_filter",
+    )
+
+    if show_filter == "Только с проблемами":
+        display_reports = [r for r in reports if r.issues]
+    elif show_filter == "Только со смешением форматов":
+        display_reports = [r for r in reports if r.has_mixed_formats]
+    else:
+        display_reports = reports
+
+    if not display_reports:
+        st.info("Нет файлов, соответствующих фильтру")
+        return
+
+    # --- Детали по каждому файлу ---
+    for report in display_reports:
+        # Иконка статуса
+        if report.error_count > 0:
+            status_icon = "❌"
+        elif report.has_mixed_formats:
+            status_icon = "🔀"
+        elif report.warning_count > 0:
+            status_icon = "⚠️"
+        else:
+            status_icon = "✅"
+
+        issue_summary = []
+        if report.error_count:
+            issue_summary.append(f"{report.error_count} ош.")
+        if report.warning_count:
+            issue_summary.append(f"{report.warning_count} пред.")
+        if report.info_count:
+            issue_summary.append(f"{report.info_count} инфо")
+        summary_str = f" ({', '.join(issue_summary)})" if issue_summary else ""
+
+        with st.expander(
+                f"{status_icon} **{report.topic_name}** — "
+                f"{report.total_cards_found} карточек{summary_str}",
+                expanded=(report.error_count > 0 or report.has_mixed_formats),
+        ):
+            # Обнаруженные форматы
+            if report.detected_formats:
+                st.markdown("**Обнаруженные форматы:**")
+                format_labels = {
+                    'single_line_basic': '🟢 Basic (::)',
+                    'single_line_bidirectional': '🔵 Bidirectional (:::)',
+                    'multi_line_basic_sep': '🟡 Multi-line (?)',
+                    'multi_line_bidirectional_sep': '🟣 Multi-line (??)',
+                    'cloze': '🟠 Cloze (==…==)',
+                    'legacy_question': '📋 Legacy (### Вопрос:)',
+                }
+                for fmt, line_nums in report.detected_formats.items():
+                    label = format_labels.get(fmt, fmt)
+                    lines_preview = ", ".join(str(ln) for ln in line_nums[:8])
+                    extra = f" ...+{len(line_nums) - 8}" if len(line_nums) > 8 else ""
+                    st.caption(f"  {label} — строки: {lines_preview}{extra}")
+
+            if report.has_mixed_formats:
+                st.warning("🔀 **Смешение форматов обнаружено!**")
+
+            # Проблемы
+            if report.issues:
+                st.markdown("**Проблемы:**")
+                for issue in report.issues:
+                    icon = SEVERITY_EMOJI.get(issue.severity, '•')
+
+                    # Цветовое оформление по severity
+                    if issue.severity == 'error':
+                        st.error(
+                            f"{icon} **Строка {issue.line_number}:** {issue.message}"
+                        )
+                    elif issue.severity == 'warning':
+                        st.warning(
+                            f"{icon} **Строка {issue.line_number}:** {issue.message}"
+                        )
+                    else:
+                        st.info(
+                            f"{icon} **Строка {issue.line_number}:** {issue.message}"
+                        )
+
+                    # Показать проблемную строку
+                    if issue.line_text:
+                        display_text = issue.line_text[:150]
+                        if len(issue.line_text) > 150:
+                            display_text += "…"
+                        st.code(display_text, language="markdown")
+
+                    # Совет
+                    if issue.suggestion:
+                        st.caption(f"💡 {issue.suggestion}")
+            else:
+                st.success("✅ Проблем не обнаружено")
+
+
+def render_tab_statistics():
+    """Вкладка статистики по колодам."""
+    input_dir = st.session_state.get('input_dir', '')
+
+    st.markdown("### 📊 Статистика")
+
+    if not os.path.exists(input_dir):
+        st.info("📁 Укажите путь к папке с материалами")
+        return
+
+    with st.spinner("Подсчёт статистики..."):
+        stats = compute_deck_statistics(input_dir)
+
+    if stats['total_files'] == 0:
+        st.warning("Нет файлов для анализа")
+        return
+
+    # --- Общая сводка ---
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("📄 Файлов", stats['total_files'])
+    col2.metric("📝 Карточек", stats['total_cards'])
+    col3.metric("🟠 Cloze", stats['cloze_count'])
+    col4.metric("💻 С кодом", stats['code_count'])
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("↔️ Reverse", stats['reverse_count'])
+    col6.metric("📦 Колод", len(stats['by_deck']))
+    col7.metric("Ø вопрос", f"{stats['avg_question_length']:.0f} сим.")
+    col8.metric("Ø ответ", f"{stats['avg_answer_length']:.0f} сим.")
+
+    st.divider()
+
+    # --- По типам ---
+    if stats['by_type']:
+        st.markdown("#### По типам карточек")
+
+        type_labels = {
+            'single_line_basic': '🟢 Basic (::)',
+            'single_line_bidirectional': '🔵 Bidirectional (:::)',
+            'multi_line_basic': '🟡 Multi-line (?)',
+            'multi_line_bidirectional': '🟣 Multi-line (??)',
+            'cloze': '🟠 Cloze (==…==)',
+        }
+
+        type_data = []
+        for type_name, count in sorted(stats['by_type'].items(), key=lambda x: -x[1]):
+            label = type_labels.get(type_name, type_name)
+            pct = (count / stats['total_cards'] * 100) if stats['total_cards'] else 0
+            type_data.append({
+                "Тип": label,
+                "Количество": count,
+                "Доля": f"{pct:.1f}%",
+            })
+
+        st.dataframe(type_data, use_container_width=True, hide_index=True)
+
+    # --- По колодам ---
+    if stats['by_deck']:
+        st.markdown("#### По колодам")
+        deck_data = []
+        for deck, count in sorted(stats['by_deck'].items(), key=lambda x: -x[1]):
+            deck_data.append({"Колода": deck, "Карточек": count})
+        st.dataframe(deck_data, use_container_width=True, hide_index=True)
+
+    # --- По категориям ---
+    if stats['by_category']:
+        st.markdown("#### По категориям")
+        cat_data = []
+        for cat, count in sorted(stats['by_category'].items(), key=lambda x: -x[1]):
+            cat_data.append({"Категория": cat, "Карточек": count})
+        st.dataframe(cat_data, use_container_width=True, hide_index=True)
+
+    # --- По файлам ---
+    if stats['by_file']:
+        with st.expander("📄 Детали по файлам", expanded=False):
+            file_data = []
+            for name, info in sorted(stats['by_file'].items()):
+                types_str = ", ".join(
+                    f"{v}×{k}" for k, v in info['types'].items()
+                )
+                file_data.append({
+                    "Файл": name,
+                    "Категория": info['category'],
+                    "Колода": info['deck'],
+                    "Карточек": info['cards'],
+                    "Типы": types_str,
+                })
+            st.dataframe(file_data, use_container_width=True, hide_index=True)
+
+    # --- Рекорды ---
+    st.markdown("#### 🏆 Рекорды")
+    q_text, q_len = stats['longest_question']
+    a_text, a_len = stats['longest_answer']
+    st.caption(f"Самый длинный вопрос: {q_len} сим. — «{q_text}…»")
+    st.caption(f"Самый длинный ответ: {a_len} сим. — «{a_text}…»")
+
 
 def render_tab_generation(config, generator: CardGenerator):
-    """Отрисовывает вкладку генерации."""
     input_dir = st.session_state['input_dir']
     categories = st.session_state.get('selected_categories', [])
     export_fmt = st.session_state.get('export_format', 'both')
     use_reverse = st.session_state.get('use_reverse_cards', True)
     clean_dupes = st.session_state.get('clean_duplicates', False)
 
-    # ─── Подсчёт тем с учётом фильтра ───────────
     topics_count = 0
     filtered_count = 0
 
@@ -565,7 +852,6 @@ def render_tab_generation(config, generator: CardGenerator):
         else:
             filtered_count = topics_count
 
-    # ─── Параметры ───────────────────────────────
     st.markdown("### 📋 Параметры генерации")
 
     col1, col2, col3, col4 = st.columns(4)
@@ -591,7 +877,6 @@ def render_tab_generation(config, generator: CardGenerator):
         "Да" if use_reverse else "Нет",
     )
 
-    # Фильтр-предупреждение
     if categories and filtered_count == 0 and topics_count > 0:
         st.error(
             f"❌ Нет тем для выбранных категорий: "
@@ -608,7 +893,26 @@ def render_tab_generation(config, generator: CardGenerator):
                 f"Категории в файлах: {', '.join(existing_cats)}"
             )
 
-    # Опции
+    # --- Предварительная проверка валидации ---
+    if os.path.exists(input_dir) and filtered_count > 0:
+        validation_reports = st.session_state.get('validation_reports', None)
+        if validation_reports:
+            total_errors = sum(r.error_count for r in validation_reports)
+            mixed_count = sum(1 for r in validation_reports if r.has_mixed_formats)
+
+            if total_errors > 0 or mixed_count > 0:
+                warning_parts = []
+                if total_errors > 0:
+                    warning_parts.append(f"{total_errors} ошибок в материалах")
+                if mixed_count > 0:
+                    warning_parts.append(f"{mixed_count} файлов со смешением форматов")
+
+                st.warning(
+                    f"⚠️ Обнаружены проблемы: {', '.join(warning_parts)}. "
+                    f"Рекомендуется исправить перед генерацией. "
+                    f"См. вкладку **🔍 Валидация**."
+                )
+
     options_parts = []
     if use_reverse:
         options_parts.append("↔️ Reverse карточки")
@@ -623,7 +927,6 @@ def render_tab_generation(config, generator: CardGenerator):
 
     st.divider()
 
-    # ─── Кнопка генерации ────────────────────────
     can_generate = (
             os.path.exists(input_dir) and filtered_count > 0
     )
@@ -649,12 +952,10 @@ def render_tab_generation(config, generator: CardGenerator):
     if generate_clicked:
         reset_generation_state()
 
-        # Автосохранение настроек
         settings = collect_current_settings()
         if settings.auto_save:
             settings.save()
 
-        # Прогресс-бар
         progress_bar = st.progress(0, text="Подготовка...")
         status_text = st.empty()
 
@@ -691,7 +992,6 @@ def render_tab_generation(config, generator: CardGenerator):
             with st.expander("🔍 Трассировка ошибки"):
                 st.code(traceback.format_exc())
 
-    # ─── Результаты ──────────────────────────────
     result = st.session_state.get('last_result')
     if not result:
         return
@@ -701,7 +1001,6 @@ def render_tab_generation(config, generator: CardGenerator):
 
 
 def _display_generation_result(result: GenerationResult):
-    """Отображает результат генерации с метриками."""
     if result.success:
         st.success("### ✅ Генерация завершена!")
 
@@ -710,7 +1009,6 @@ def _display_generation_result(result: GenerationResult):
         col2.metric("📚 Тем", result.topics_processed)
         col3.metric("📄 Файлов", len(result.output_files))
 
-        # Статистика по типам
         if result.cards_by_type:
             with st.expander("📊 По типам карточек", expanded=False):
                 for type_name, count in sorted(
@@ -719,7 +1017,6 @@ def _display_generation_result(result: GenerationResult):
                     label = type_name.replace('_', ' ').title()
                     st.caption(f"• **{label}:** {count}")
 
-        # Статистика по категориям
         if result.cards_by_category:
             with st.expander("📊 По категориям", expanded=False):
                 for cat, count in sorted(
@@ -732,7 +1029,6 @@ def _display_generation_result(result: GenerationResult):
         for error in result.errors:
             st.error(error)
 
-    # Предупреждения
     if result.warnings:
         with st.expander(
                 f"⚠️ Предупреждения ({len(result.warnings)})",
@@ -742,12 +1038,7 @@ def _display_generation_result(result: GenerationResult):
                 st.warning(w)
 
 
-# =============================================================================
-# Вкладка: Файлы
-# =============================================================================
-
 def render_tab_files(generator: CardGenerator):
-    """Отрисовывает вкладку управления файлами."""
     files = st.session_state.get('generated_files', [])
 
     if not files:
@@ -765,7 +1056,6 @@ def render_tab_files(generator: CardGenerator):
 
     st.markdown(f"### 📂 Файлы ({len(existing_files)})")
 
-    # ─── Скачать всё ZIP ─────────────────────────
     if len(existing_files) > 1:
         zip_buffer = create_zip_from_files(existing_files)
         st.download_button(
@@ -777,7 +1067,6 @@ def render_tab_files(generator: CardGenerator):
         )
         st.divider()
 
-    # ─── Группировка по типу ─────────────────────
     obsidian_files = [f for f in existing_files if f.endswith('.md')]
     anki_basic = [
         f for f in existing_files
@@ -791,7 +1080,7 @@ def render_tab_files(generator: CardGenerator):
         f for f in existing_files
         if '_anki_cloze' in os.path.basename(f)
     ]
-    # Файлы, не попавшие в группы
+
     grouped = set(obsidian_files + anki_basic + anki_reversed + anki_cloze)
     other_files = [f for f in existing_files if f not in grouped]
 
@@ -838,7 +1127,6 @@ def render_tab_files(generator: CardGenerator):
 
     st.divider()
 
-    # ─── Управление ──────────────────────────────
     col1, col2 = st.columns(2)
     with col1:
         if st.button(
@@ -864,7 +1152,6 @@ def render_tab_files(generator: CardGenerator):
 
 
 def _render_file_row(file_path: str, idx: int, prefix: str):
-    """Отрисовывает строку файла с предпросмотром и скачиванием."""
     file_name = os.path.basename(file_path)
     file_size = get_file_size_str(file_path)
 
@@ -878,7 +1165,6 @@ def _render_file_row(file_path: str, idx: int, prefix: str):
     col1, col2 = st.columns([4, 1])
 
     with col1:
-        # Подсчёт карточек для Anki файлов
         extra = ""
         if file_path.endswith('.txt'):
             lines_count = count_data_lines(file_path)
@@ -910,16 +1196,9 @@ def _render_file_row(file_path: str, idx: int, prefix: str):
         )
 
 
-# =============================================================================
-# Вкладка: Настройки
-# =============================================================================
-
 def render_tab_settings(config):
-    """Отрисовывает вкладку конфигурации и справки."""
-
     st.markdown("### ⚙️ Конфигурация")
 
-    # ─── Пути ────────────────────────────────────
     with st.expander("📂 Пути приложения", expanded=True):
         st.text_input(
             "Obsidian Vault",
@@ -954,7 +1233,6 @@ def render_tab_settings(config):
             "`config.ini` и перезапустите приложение."
         )
 
-    # ─── Лимиты ──────────────────────────────────
     with st.expander("📏 Лимиты", expanded=False):
         col1, col2, col3 = st.columns(3)
         col1.metric(
@@ -967,7 +1245,6 @@ def render_tab_settings(config):
             "Длина ответа", config.max_answer_length
         )
 
-    # ─── Категории ───────────────────────────────
     with st.expander("🏷️ Категории", expanded=False):
         if config.categories:
             cols = st.columns(
@@ -978,7 +1255,6 @@ def render_tab_settings(config):
         else:
             st.warning("Категории не настроены")
 
-    # ─── Предпросмотр (длина) ────────────────────
     with st.expander("🔧 Настройки UI", expanded=False):
         st.slider(
             "Длина предпросмотра (символы)",
@@ -992,7 +1268,6 @@ def render_tab_settings(config):
 
     st.divider()
 
-    # ─── Справка по форматам ─────────────────────
     with st.expander("📖 Справка по форматам карточек"):
         st.markdown("""
         | Формат | Синтаксис | Описание |
@@ -1005,9 +1280,9 @@ def render_tab_settings(config):
         | **Cloze + hint** | `==текст==^[подсказка]` | Пропуск с подсказкой |
         | **Cloze + seq** | `==текст==^[hint][^1]` | Группированные пропуски |
         | **Legacy** | `### Вопрос: ... Ответ: ...` | Старый формат |
-        
+
         #### Frontmatter (YAML)
-        
+
         ```yaml
         ---
         tags: [flashcards/python]
@@ -1015,49 +1290,45 @@ def render_tab_settings(config):
         deck: flashcards/python
         ---
         ```
-        
+
         **Приоритет определения колоды:**
         1. Поле `deck` во frontmatter
         2. Тег `flashcards/...` в `tags`
         3. `flashcards/<category>` (автоматически)
         """)
 
-    # ─── Anki Import ─────────────────────────────
     with st.expander("🃏 Импорт в Anki"):
         st.markdown("""
         **Как импортировать в Anki:**
-        
+
         1. Откройте Anki → **File → Import...**
         2. Выберите нужный файл
         3. Anki автоматически определит формат из заголовков
         4. Нажмите **Import**
-            
+
         **Типы файлов (соответствуют Obsidian SR):**
-    
+
         | Файл | Note Type | Исходный формат |
         |------|-----------|-----------------|
         | `*_anki_basic.txt` | Basic | `::` и `?` |
         | `*_anki_reversed.txt` | Basic (and reversed card) | `:::` и `??` |
         | `*_anki_cloze.txt` | Cloze | `==text==` |
-    
+
         **Особенности:**
         - **Basic** — одно направление: Front → Back
         - **Reversed** — Anki автоматически создаёт оба направления
-          (не нужно импортировать 2 карточки вручную)
         - **Cloze** — конвертация `==text==` → `{{c1::text}}`
-          с поддержкой подсказок и группировки
         - Теги и колоды проставляются автоматически
         - При повторном импорте дубликаты обновляются
         """)
 
-    # ─── О приложении ────────────────────────────
     with st.expander("ℹ️ О приложении"):
         st.markdown(f"""
         **Interview Cards** v{APP_VERSION}
-        
+
         Генератор карточек Spaced Repetition
         из Markdown для подготовки к техническим собеседованиям.
-        
+
         **Возможности:**
         - 📝 Obsidian Spaced Repetition формат
         - 🃏 Anki импорт (Basic + Cloze)
@@ -1065,6 +1336,9 @@ def render_tab_settings(config):
         - 🧹 Дедупликация карточек
         - ↔️ Двусторонние карточки
         - 🔗 Ссылки на исходные материалы
+        - 🔍 Валидация форматов с указанием проблемных строк
+        - 🔎 Поиск по карточкам
+        - 📊 Детальная статистика
         """)
 
         st.caption(
@@ -1073,14 +1347,7 @@ def render_tab_settings(config):
         st.caption(f"Конфигурация: `{config._config_path}`")
 
 
-# =============================================================================
-# Главная функция
-# =============================================================================
-
 def main():
-    """Главная функция Streamlit приложения."""
-
-    # ─── Конфигурация страницы (ПЕРВЫЙ вызов Streamlit) ──
     st.set_page_config(
         page_title="Interview Cards",
         page_icon="📚",
@@ -1088,7 +1355,6 @@ def main():
         initial_sidebar_state="expanded",
     )
 
-    # Минимальная стилизация
     st.markdown("""
     <style>
         .stTabs [data-baseweb="tab-list"] { gap: 4px; }
@@ -1099,32 +1365,27 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # ─── Загрузка конфигурации ───────────────────
     config = get_config()
     config.create_directories()
 
-    # ─── Загрузка настроек ───────────────────────
     settings = UserSettings.load()
     settings.merge_with_config(config)
 
-    # ─── Генератор ───────────────────────────────
     generator = CardGenerator(config)
 
-    # ─── Инициализация состояния ─────────────────
     init_session_state(config, settings)
 
-    # ─── Заголовок ───────────────────────────────
     st.title("📚 Interview Cards")
     st.caption(
         "Генератор карточек Spaced Repetition из Markdown"
     )
 
-    # ─── Боковая панель ──────────────────────────
     render_sidebar(config, generator)
 
-    # ─── Вкладки основного контента ──────────────
-    tab_topics, tab_gen, tab_files, tab_settings = st.tabs([
+    tab_topics, tab_validation, tab_stats, tab_gen, tab_files, tab_settings = st.tabs([
         "📋 Темы",
+        "🔍 Валидация",
+        "📊 Статистика",
         "🚀 Генерация",
         "📂 Файлы",
         "⚙️ Настройки",
@@ -1132,6 +1393,12 @@ def main():
 
     with tab_topics:
         render_tab_topics(generator)
+
+    with tab_validation:
+        render_tab_validation()
+
+    with tab_stats:
+        render_tab_statistics()
 
     with tab_gen:
         render_tab_generation(config, generator)

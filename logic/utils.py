@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -33,10 +34,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# =============================================================================
-# Константы и паттерны для Spaced Repetition
-# =============================================================================
 
 SEPARATORS = {
     'single_line_basic': '::',
@@ -88,12 +85,699 @@ BIDIRECTIONAL_CARD_TYPES = (
 )
 
 
-# =============================================================================
-# Вспомогательные функции
-# =============================================================================
+# ──────────────────────────────────────────────────────
+#  ВАЛИДАЦИЯ И ДИАГНОСТИКА ФОРМАТОВ
+# ──────────────────────────────────────────────────────
+
+@dataclass
+class FormatIssue:
+    """Одна проблема, обнаруженная при валидации файла."""
+    severity: str  # 'error', 'warning', 'info'
+    line_number: int  # 1-based
+    line_text: str  # текст проблемной строки
+    message: str  # описание проблемы
+    suggestion: str = ""  # предлагаемое исправление
+
+    def __repr__(self):
+        return (
+            f"[{self.severity.upper()}] line {self.line_number}: "
+            f"{self.message}"
+        )
+
+
+@dataclass
+class FileValidationReport:
+    """Отчёт валидации одного файла."""
+    file_path: str
+    topic_name: str
+    issues: List[FormatIssue] = field(default_factory=list)
+    detected_formats: Dict[str, List[int]] = field(default_factory=dict)
+    has_mixed_formats: bool = False
+    total_cards_found: int = 0
+    is_valid: bool = True
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == 'error')
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == 'warning')
+
+    @property
+    def info_count(self) -> int:
+        return sum(1 for i in self.issues if i.severity == 'info')
+
+    def to_text(self) -> str:
+        lines = [f"=== {self.topic_name} ==="]
+        lines.append(f"Файл: {self.file_path}")
+        lines.append(f"Карточек найдено: {self.total_cards_found}")
+        lines.append(f"Смешение форматов: {'Да ⚠️' if self.has_mixed_formats else 'Нет ✅'}")
+
+        if self.detected_formats:
+            lines.append("Обнаруженные форматы:")
+            for fmt, line_nums in self.detected_formats.items():
+                lines.append(f"  - {fmt}: строки {', '.join(map(str, line_nums[:10]))}"
+                             + (f" ...и ещё {len(line_nums) - 10}" if len(line_nums) > 10 else ""))
+
+        if self.issues:
+            lines.append(f"\nПроблемы ({len(self.issues)}):")
+            for issue in self.issues:
+                icon = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(issue.severity, "•")
+                lines.append(f"  {icon} Строка {issue.line_number}: {issue.message}")
+                if issue.line_text:
+                    display_text = issue.line_text[:120]
+                    if len(issue.line_text) > 120:
+                        display_text += "…"
+                    lines.append(f"     │ {display_text}")
+                if issue.suggestion:
+                    lines.append(f"     └ Совет: {issue.suggestion}")
+        else:
+            lines.append("✅ Проблем не обнаружено")
+
+        return "\n".join(lines)
+
+
+def detect_line_format(line: str) -> Optional[str]:
+    """Определяет формат карточки в одной строке.
+    Возвращает строковое описание формата или None."""
+
+    stripped = line.strip()
+
+    if not stripped or stripped.startswith('#') or stripped.startswith('```'):
+        return None
+    if stripped == '---':
+        return None
+
+    # Порядок важен: сначала более специфичные паттерны
+    if re.match(r'^###\s*Вопрос:', stripped):
+        return 'legacy_question'
+
+    if stripped == '??':
+        return 'multi_line_bidirectional_sep'
+    if stripped == '?':
+        return 'multi_line_basic_sep'
+
+    if ':::' in stripped and not stripped.startswith('```'):
+        parts = stripped.split(':::')
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            return 'single_line_bidirectional'
+
+    if '::' in stripped and ':::' not in stripped and not stripped.startswith('```'):
+        parts = stripped.split('::')
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            return 'single_line_basic'
+
+    if re.search(r'==.+?==', stripped):
+        return 'cloze'
+
+    return None
+
+
+def _check_mixed_formats_in_block(
+        lines: List[str],
+        start_line_num: int,
+        issues: List[FormatIssue],
+        detected_formats: Dict[str, List[int]],
+) -> None:
+    """Проверяет блок строк на смешение форматов карточек."""
+
+    block_formats: Dict[str, List[int]] = {}
+    in_code_block = False
+
+    for offset, line in enumerate(lines):
+        line_num = start_line_num + offset
+        stripped = line.strip()
+
+        if stripped.startswith('```'):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+
+        fmt = detect_line_format(stripped)
+        if fmt:
+            if fmt not in block_formats:
+                block_formats[fmt] = []
+            block_formats[fmt].append(line_num)
+
+            if fmt not in detected_formats:
+                detected_formats[fmt] = []
+            detected_formats[fmt].append(line_num)
+
+    return block_formats
+
+
+FORMAT_COMPATIBILITY_GROUPS = {
+    'qa_formats': {'single_line_basic', 'single_line_bidirectional',
+                   'multi_line_basic_sep', 'multi_line_bidirectional_sep',
+                   'legacy_question'},
+    'cloze_formats': {'cloze'},
+}
+
+# Форматы, которые НЕ должны смешиваться в одном блоке-карточке
+INCOMPATIBLE_PAIRS = [
+    ({'single_line_basic', 'single_line_bidirectional'},
+     "Basic (::) и Bidirectional (:::) в одном блоке — "
+     "используйте один формат"),
+
+    ({'multi_line_basic_sep', 'multi_line_bidirectional_sep'},
+     "Разделители ? и ?? в одном блоке — "
+     "используйте один тип разделителя"),
+
+    ({'single_line_basic', 'multi_line_basic_sep'},
+     "Однострочный (::) и многострочный (?) в одном блоке — "
+     "разделите на отдельные блоки"),
+
+    ({'single_line_bidirectional', 'multi_line_bidirectional_sep'},
+     "Однострочный (:::) и многострочный (??) в одном блоке — "
+     "разделите на отдельные блоки"),
+]
+
+
+def validate_file_formats(file_path: str) -> FileValidationReport:
+    """Полная валидация одного Markdown-файла.
+    Проверяет смешение форматов, проблемные строки и т.д."""
+
+    topic_name = Path(file_path).stem
+    report = FileValidationReport(
+        file_path=file_path,
+        topic_name=topic_name,
+    )
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        report.issues.append(FormatIssue(
+            severity='error', line_number=0, line_text='',
+            message=f"Не удалось прочитать файл: {e}",
+        ))
+        report.is_valid = False
+        return report
+
+    lines = content.splitlines()
+
+    # --- 1. Проверка frontmatter ---
+    _validate_frontmatter(content, lines, report)
+
+    # --- 2. Построчный анализ форматов ---
+    in_code_block = False
+    in_frontmatter = False
+    frontmatter_ended = False
+    all_formats_with_lines: Dict[str, List[int]] = {}
+
+    for line_num_0, line in enumerate(lines):
+        line_num = line_num_0 + 1
+        stripped = line.strip()
+
+        # Отслеживание frontmatter
+        if line_num_0 == 0 and stripped == '---':
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if stripped == '---':
+                in_frontmatter = False
+                frontmatter_ended = True
+            continue
+
+        # Отслеживание блоков кода
+        if stripped.startswith('```'):
+            in_code_block = not in_code_block
+            # Проверка незакрытого блока кода в конце файла
+            continue
+        if in_code_block:
+            continue
+
+        # Определение формата строки
+        fmt = detect_line_format(stripped)
+        if fmt:
+            if fmt not in all_formats_with_lines:
+                all_formats_with_lines[fmt] = []
+            all_formats_with_lines[fmt].append(line_num)
+
+        # --- Проверка проблемных строк ---
+
+        # :: в начале или конце строки (пустой вопрос/ответ)
+        if fmt == 'single_line_basic':
+            parts = stripped.split('::', 1)
+            if not parts[0].strip():
+                report.issues.append(FormatIssue(
+                    severity='error', line_number=line_num,
+                    line_text=stripped,
+                    message="Пустой вопрос перед разделителем '::'",
+                    suggestion="Добавьте текст вопроса перед '::'",
+                ))
+            if len(parts) > 1 and not parts[1].strip():
+                report.issues.append(FormatIssue(
+                    severity='warning', line_number=line_num,
+                    line_text=stripped,
+                    message="Пустой ответ после разделителя '::'",
+                    suggestion="Добавьте текст ответа после '::'",
+                ))
+
+        if fmt == 'single_line_bidirectional':
+            parts = stripped.split(':::', 1)
+            if not parts[0].strip():
+                report.issues.append(FormatIssue(
+                    severity='error', line_number=line_num,
+                    line_text=stripped,
+                    message="Пустая сторона перед разделителем ':::'",
+                    suggestion="Добавьте текст перед ':::'",
+                ))
+            if len(parts) > 1 and not parts[1].strip():
+                report.issues.append(FormatIssue(
+                    severity='error', line_number=line_num,
+                    line_text=stripped,
+                    message="Пустая сторона после разделителя ':::'",
+                    suggestion="Добавьте текст после ':::'",
+                ))
+
+        # Проверка незакрытых cloze
+        if '==' in stripped:
+            count = stripped.count('==')
+            if count % 2 != 0:
+                report.issues.append(FormatIssue(
+                    severity='warning', line_number=line_num,
+                    line_text=stripped,
+                    message="Нечётное количество '==' — возможно незакрытый cloze",
+                    suggestion="Проверьте, что каждый ==текст== имеет закрывающий ==",
+                ))
+
+        # Одиночные ? и ?? — предупреждение, если следующая строка пуста
+        if stripped in ('?', '??'):
+            next_idx = line_num_0 + 1
+            if next_idx >= len(lines) or not lines[next_idx].strip():
+                report.issues.append(FormatIssue(
+                    severity='warning', line_number=line_num,
+                    line_text=stripped,
+                    message=f"Разделитель '{stripped}' без ответа на следующей строке",
+                    suggestion="Добавьте ответ после разделителя",
+                ))
+
+            # Проверка: есть ли вопрос ПЕРЕД разделителем?
+            prev_idx = line_num_0 - 1
+            while prev_idx >= 0 and not lines[prev_idx].strip():
+                prev_idx -= 1
+            if prev_idx < 0 or lines[prev_idx].strip().startswith('#') or lines[prev_idx].strip() == '---':
+                report.issues.append(FormatIssue(
+                    severity='warning', line_number=line_num,
+                    line_text=stripped,
+                    message=f"Разделитель '{stripped}' без вопроса перед ним",
+                    suggestion="Добавьте текст вопроса перед разделителем",
+                ))
+
+        # Множественные :: в одной строке (возможно ошибка)
+        if '::' in stripped and not stripped.startswith('#'):
+            double_colon_count = len(re.findall(r'(?<!:)::(?!:)', stripped))
+            triple_colon_count = len(re.findall(r':::', stripped))
+            if double_colon_count > 1 and triple_colon_count == 0:
+                report.issues.append(FormatIssue(
+                    severity='warning', line_number=line_num,
+                    line_text=stripped,
+                    message=f"Множественные '::' в одной строке ({double_colon_count} шт.) — "
+                            f"возможно нужно разбить на несколько карточек",
+                    suggestion="Каждая карточка должна быть на отдельной строке",
+                ))
+
+    # Проверка незакрытого блока кода
+    if in_code_block:
+        report.issues.append(FormatIssue(
+            severity='error', line_number=len(lines),
+            line_text='',
+            message="Незакрытый блок кода (``` без парного закрывающего ```)",
+            suggestion="Добавьте закрывающий ``` в конце блока кода",
+        ))
+
+    report.detected_formats = all_formats_with_lines
+
+    # --- 3. Проверка смешения форматов ---
+    _check_format_mixing(all_formats_with_lines, report)
+
+    # --- 4. Подсчёт карточек ---
+    try:
+        cards = parse_cards_from_markdown(file_path)
+        report.total_cards_found = len(cards)
+    except Exception:
+        report.total_cards_found = 0
+
+    # --- 5. Дополнительные проверки ---
+    _check_empty_content(content, lines, report)
+    _check_very_long_lines(lines, report)
+    _check_duplicate_questions(file_path, report)
+
+    report.is_valid = report.error_count == 0
+
+    return report
+
+
+def _validate_frontmatter(
+        content: str,
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверка frontmatter."""
+    fm = extract_frontmatter(content)
+
+    if not fm:
+        report.issues.append(FormatIssue(
+            severity='info', line_number=1,
+            line_text='',
+            message="Отсутствует frontmatter (---...---)",
+            suggestion="Добавьте frontmatter с тегами и категорией: "
+                       "tags: [flashcards/...], category: ...",
+        ))
+        return
+
+    if 'tags' not in fm:
+        report.issues.append(FormatIssue(
+            severity='warning', line_number=1,
+            line_text='',
+            message="Frontmatter без поля 'tags'",
+            suggestion="Добавьте tags: [flashcards/category]",
+        ))
+
+    if 'category' not in fm and 'deck' not in fm:
+        report.issues.append(FormatIssue(
+            severity='info', line_number=1,
+            line_text='',
+            message="Frontmatter без 'category' и 'deck' — "
+                    "будет использована категория из имени папки",
+        ))
+
+    tags = normalize_tags(fm.get('tags', []))
+    has_flashcards_tag = any(
+        t.startswith('flashcards') for t in tags
+    )
+    if tags and not has_flashcards_tag:
+        report.issues.append(FormatIssue(
+            severity='info', line_number=1,
+            line_text=f"tags: {fm.get('tags')}",
+            message="Нет тега flashcards/... — колода будет определена автоматически",
+            suggestion="Добавьте тег flashcards/<category> для явного указания колоды",
+        ))
+
+
+def _check_format_mixing(
+        all_formats: Dict[str, List[int]],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет смешение несовместимых форматов в файле."""
+
+    format_names = set(all_formats.keys())
+
+    # Исключаем cloze — он может сосуществовать с другими
+    qa_formats = format_names - {'cloze'}
+
+    # Проверка несовместимых пар
+    for incompatible_set, message in INCOMPATIBLE_PAIRS:
+        found = incompatible_set & format_names
+        if len(found) >= 2:
+            report.has_mixed_formats = True
+
+            # Собираем строки каждого формата для отчёта
+            details_parts = []
+            for fmt in sorted(found):
+                fmt_lines = all_formats.get(fmt, [])
+                if fmt_lines:
+                    lines_str = ", ".join(str(ln) for ln in fmt_lines[:5])
+                    if len(fmt_lines) > 5:
+                        lines_str += f" ...+{len(fmt_lines) - 5}"
+                    details_parts.append(f"  '{fmt}' на строках: {lines_str}")
+
+            report.issues.append(FormatIssue(
+                severity='warning',
+                line_number=min(
+                    ln for fmt in found for ln in all_formats.get(fmt, [0])
+                ),
+                line_text='',
+                message=f"Смешение форматов: {message}",
+                suggestion="Используйте один формат карточек в файле или "
+                           "разделите на отдельные файлы.\n" +
+                           "\n".join(details_parts),
+            ))
+
+    # Общее предупреждение если > 2 разных QA-форматов
+    if len(qa_formats) > 2:
+        report.has_mixed_formats = True
+        report.issues.append(FormatIssue(
+            severity='warning', line_number=1,
+            line_text='',
+            message=f"Используется {len(qa_formats)} различных форматов "
+                    f"карточек: {', '.join(sorted(qa_formats))}",
+            suggestion="Рекомендуется использовать 1-2 формата в одном файле "
+                       "для предсказуемого парсинга",
+        ))
+
+
+def _check_empty_content(
+        content: str,
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверка на пустое содержимое."""
+    content_without_fm = strip_frontmatter(content).strip()
+    if not content_without_fm:
+        report.issues.append(FormatIssue(
+            severity='error', line_number=1,
+            line_text='',
+            message="Файл не содержит контента (только frontmatter)",
+            suggestion="Добавьте карточки после frontmatter",
+        ))
+
+    if not validate_markdown_structure(content):
+        report.issues.append(FormatIssue(
+            severity='warning', line_number=1,
+            line_text='',
+            message="Не найдено распознаваемых форматов карточек",
+            suggestion="Используйте :: для Basic, ::: для Bidirectional, "
+                       "? / ?? для многострочных, == для Cloze",
+        ))
+
+
+def _check_very_long_lines(
+        lines: List[str],
+        report: FileValidationReport,
+        max_line_length: int = 1000,
+) -> None:
+    """Предупреждение о слишком длинных строках."""
+    in_code_block = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith('```'):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if len(line) > max_line_length:
+            report.issues.append(FormatIssue(
+                severity='info',
+                line_number=i + 1,
+                line_text=line[:100] + '…',
+                message=f"Очень длинная строка ({len(line)} символов) — "
+                        f"может быть сложно редактировать",
+                suggestion="Рассмотрите разбивку на многострочный формат (? или ??)",
+            ))
+
+
+def _check_duplicate_questions(
+        file_path: str,
+        report: FileValidationReport,
+) -> None:
+    """Проверяет дублирование вопросов внутри файла."""
+    try:
+        cards = parse_cards_from_markdown(file_path)
+    except Exception:
+        return
+
+    seen: Dict[str, int] = {}
+    for card in cards:
+        key = normalize_text_key(card.question)
+        if key in seen:
+            report.issues.append(FormatIssue(
+                severity='warning',
+                line_number=0,
+                line_text=card.question[:100],
+                message=f"Дубликат вопроса: '{card.question[:60]}…' "
+                        f"(уже встречался как карточка #{seen[key]})",
+                suggestion="Удалите дублирующуюся карточку",
+            ))
+        else:
+            seen[key] = card.id
+
+
+def validate_all_files(input_dir: str) -> List[FileValidationReport]:
+    """Валидация всех MD-файлов в директории."""
+    reports = []
+
+    if not os.path.exists(input_dir):
+        return reports
+
+    input_path = Path(input_dir)
+    for file_path in sorted(input_path.rglob('*.md')):
+        report = validate_file_formats(str(file_path))
+        reports.append(report)
+
+    return reports
+
+
+def generate_validation_report_text(reports: List[FileValidationReport]) -> str:
+    """Генерирует текстовый отчёт валидации."""
+    lines = [
+        "=" * 60,
+        "ОТЧЁТ ВАЛИДАЦИИ МАТЕРИАЛОВ",
+        "=" * 60,
+        "",
+    ]
+
+    total_errors = sum(r.error_count for r in reports)
+    total_warnings = sum(r.warning_count for r in reports)
+    total_info = sum(r.info_count for r in reports)
+    mixed_count = sum(1 for r in reports if r.has_mixed_formats)
+
+    lines.append(f"Файлов проверено: {len(reports)}")
+    lines.append(f"Ошибок: {total_errors}")
+    lines.append(f"Предупреждений: {total_warnings}")
+    lines.append(f"Информация: {total_info}")
+    lines.append(f"Файлов со смешением форматов: {mixed_count}")
+    lines.append("")
+
+    # Сначала файлы с проблемами
+    problem_reports = [r for r in reports if r.issues]
+    clean_reports = [r for r in reports if not r.issues]
+
+    if problem_reports:
+        lines.append("-" * 40)
+        lines.append("ФАЙЛЫ С ПРОБЛЕМАМИ")
+        lines.append("-" * 40)
+        for report in problem_reports:
+            lines.append("")
+            lines.append(report.to_text())
+
+    if clean_reports:
+        lines.append("")
+        lines.append("-" * 40)
+        lines.append("ФАЙЛЫ БЕЗ ПРОБЛЕМ")
+        lines.append("-" * 40)
+        for report in clean_reports:
+            lines.append(f"  ✅ {report.topic_name} ({report.total_cards_found} карточек)")
+
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────
+#  ПОИСК ПО КАРТОЧКАМ
+# ──────────────────────────────────────────────────────
+
+def search_cards(
+        cards: List[InterviewCard],
+        query: str,
+        search_in_answers: bool = True,
+        search_in_questions: bool = True,
+        case_sensitive: bool = False,
+) -> List[InterviewCard]:
+    """Поиск карточек по тексту."""
+    if not query or not query.strip():
+        return cards
+
+    q = query.strip()
+    if not case_sensitive:
+        q = q.lower()
+
+    results = []
+    for card in cards:
+        question = card.question if case_sensitive else card.question.lower()
+        answer = card.answer if case_sensitive else card.answer.lower()
+
+        matched = False
+        if search_in_questions and q in question:
+            matched = True
+        if search_in_answers and q in answer:
+            matched = True
+
+        if matched:
+            results.append(card)
+
+    return results
+
+
+# ──────────────────────────────────────────────────────
+#  СТАТИСТИКА
+# ──────────────────────────────────────────────────────
+
+def compute_deck_statistics(input_dir: str) -> Dict[str, Any]:
+    """Подробная статистика по колодам и категориям."""
+    topics = load_markdown_topics(input_dir)
+
+    stats = {
+        'total_files': len(topics),
+        'total_cards': 0,
+        'by_deck': {},  # deck_name -> count
+        'by_category': {},  # category -> count
+        'by_type': {},  # card_type -> count
+        'by_file': {},  # topic_name -> {cards, types, ...}
+        'cloze_count': 0,
+        'code_count': 0,
+        'reverse_count': 0,
+        'avg_question_length': 0,
+        'avg_answer_length': 0,
+        'longest_question': ('', 0),
+        'longest_answer': ('', 0),
+        'files_with_issues': 0,
+    }
+
+    all_q_lengths = []
+    all_a_lengths = []
+
+    for topic_name, topic_data in topics.items():
+        cards = parse_cards_from_markdown(topic_data['path'])
+        deck_name = topic_data.get('deck_name', 'flashcards')
+        category = topic_data.get('category', 'general')
+
+        stats['total_cards'] += len(cards)
+        stats['by_deck'][deck_name] = stats['by_deck'].get(deck_name, 0) + len(cards)
+        stats['by_category'][category] = stats['by_category'].get(category, 0) + len(cards)
+
+        type_counts = {}
+        for card in cards:
+            type_name = card.card_type.value
+            stats['by_type'][type_name] = stats['by_type'].get(type_name, 0) + 1
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+
+            if card.card_type == CardType.CLOZE:
+                stats['cloze_count'] += 1
+            if card.has_code():
+                stats['code_count'] += 1
+            if card.is_reverse:
+                stats['reverse_count'] += 1
+
+            all_q_lengths.append(len(card.question))
+            all_a_lengths.append(len(card.answer))
+
+            if len(card.question) > stats['longest_question'][1]:
+                stats['longest_question'] = (card.question[:80], len(card.question))
+            if len(card.answer) > stats['longest_answer'][1]:
+                stats['longest_answer'] = (card.answer[:80], len(card.answer))
+
+        stats['by_file'][topic_name] = {
+            'cards': len(cards),
+            'types': type_counts,
+            'category': category,
+            'deck': deck_name,
+        }
+
+    if all_q_lengths:
+        stats['avg_question_length'] = sum(all_q_lengths) / len(all_q_lengths)
+    if all_a_lengths:
+        stats['avg_answer_length'] = sum(all_a_lengths) / len(all_a_lengths)
+
+    return stats
+
+
+# ──────────────────────────────────────────────────────
+#  Остальные функции (без изменений, но с добавлением import)
+# ──────────────────────────────────────────────────────
 
 def normalize_tags(tags: Any) -> List[str]:
-    """Нормализует теги к списку строк."""
     if tags is None:
         return []
 
@@ -114,7 +798,6 @@ def normalize_tags(tags: Any) -> List[str]:
 
 
 def strip_frontmatter(content: str) -> str:
-    """Удаляет YAML frontmatter из контента."""
     return re.sub(
         PATTERNS['frontmatter'],
         '',
@@ -125,24 +808,18 @@ def strip_frontmatter(content: str) -> str:
 
 
 def normalize_text_key(text: str) -> str:
-    """Нормализует текст для поиска дублей."""
     if not text:
         return ""
     return re.sub(r'\s+', ' ', text).strip()
 
 
 def remove_scheduling_comment(text: str) -> str:
-    """Удаляет комментарий планирования из текста карточки."""
     if not text:
         return ""
     return re.sub(PATTERNS['scheduling_comment'], '', text).strip()
 
 
 def build_cloze_question(text: str) -> str:
-    """
-    Строит маскированную версию cloze-текста.
-    Используется как question для валидации и Anki-экспорта.
-    """
     if not text:
         return "Cloze"
 
@@ -169,9 +846,6 @@ def build_cloze_question(text: str) -> str:
 
 
 def reveal_cloze_text(text: str) -> str:
-    """
-    Превращает Cloze-разметку в обычный текст с выделением скрытых частей.
-    """
     if not text:
         return ""
 
@@ -185,7 +859,6 @@ def reveal_cloze_text(text: str) -> str:
 
 
 def should_skip_line_for_single_pass(line: str) -> bool:
-    """Проверяет, надо ли пропустить строку в однострочном парсинге."""
     if not line:
         return True
 
@@ -203,7 +876,6 @@ def should_skip_line_for_single_pass(line: str) -> bool:
 
 
 def contains_single_line_card_syntax(section: str) -> bool:
-    """Проверяет, содержит ли секция однострочную карточку."""
     in_code_block = False
 
     for raw_line in section.splitlines():
@@ -223,7 +895,6 @@ def contains_single_line_card_syntax(section: str) -> bool:
 
 
 def split_markdown_blocks(content: str) -> List[str]:
-    """Делит Markdown на верхнеуровневые блоки, сохраняя code fences целиком."""
     blocks: List[str] = []
     current: List[str] = []
     in_code_block = False
@@ -251,7 +922,6 @@ def split_markdown_blocks(content: str) -> List[str]:
 
 
 def get_first_nonempty_line(text: str) -> str:
-    """Возвращает первую непустую строку блока."""
     for line in text.splitlines():
         stripped = line.strip()
         if stripped:
@@ -260,24 +930,20 @@ def get_first_nonempty_line(text: str) -> str:
 
 
 def is_legacy_question_block(block: str) -> bool:
-    """Проверяет, начинается ли блок с legacy-вопроса."""
     first_line = get_first_nonempty_line(block)
     return bool(re.match(r'^###\s*Вопрос:', first_line))
 
 
 def is_heading_block(block: str) -> bool:
-    """Проверяет, является ли блок обычным заголовком."""
     first_line = get_first_nonempty_line(block)
     return first_line.startswith('#') and not is_legacy_question_block(block)
 
 
 def is_horizontal_rule_block(block: str) -> bool:
-    """Проверяет, является ли блок разделителем ---."""
     return block.strip() == '---'
 
 
 def split_multiline_block(block: str) -> Optional[Tuple[str, str, str]]:
-    """Ищет внутри блока multi-line карточку."""
     lines = block.splitlines()
     in_code_block = False
 
@@ -304,7 +970,6 @@ def split_multiline_block(block: str) -> Optional[Tuple[str, str, str]]:
 
 
 def is_standalone_cloze_block(block: str) -> bool:
-    """Проверяет, является ли блок самостоятельной cloze-карточкой."""
     stripped = block.strip()
 
     if not stripped:
@@ -324,7 +989,6 @@ def is_standalone_cloze_block(block: str) -> bool:
 
 
 def is_card_boundary_block(block: str) -> bool:
-    """Проверяет, начинается ли с этого блока новая карточка."""
     stripped = block.strip()
 
     if not stripped:
@@ -346,12 +1010,10 @@ def is_card_boundary_block(block: str) -> bool:
 
 
 def extract_code_snippets_from_text(text: str) -> List[str]:
-    """Извлекает кодовые блоки из текста ответа."""
     return re.findall(PATTERNS['code_block'], text, re.DOTALL)
 
 
 def merge_multiline_sections(content: str) -> List[str]:
-    """Объединяет секции, которые относятся к одной multi-line карточке."""
     raw_sections = re.split(r'\n\s*\n', content)
     merged_sections: List[str] = []
 
@@ -408,7 +1070,6 @@ def create_cloze_card(
         frontmatter: Dict,
         scheduling: Optional[SchedulingData] = None
 ) -> Optional[InterviewCard]:
-    """Создаёт Cloze-карточку из текста."""
     cleaned_text = remove_scheduling_comment(text).strip()
     deletions = parse_cloze_deletions(cleaned_text)
 
@@ -431,15 +1092,7 @@ def create_cloze_card(
     )
 
 
-# =============================================================================
-# Загрузка и парсинг Markdown файлов
-# =============================================================================
-
 def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
-    """
-    Рекурсивно загружает материалы из Markdown файлов,
-    определяя категорию по имени папки.
-    """
     topics = {}
 
     if not os.path.exists(input_dir):
@@ -481,7 +1134,6 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
 
 
 def determine_deck_name(frontmatter: Dict, category: str) -> str:
-    """Определяет имя колоды из frontmatter."""
     if 'deck' in frontmatter:
         deck = frontmatter['deck']
         if isinstance(deck, str) and deck.strip():
@@ -499,7 +1151,6 @@ def determine_deck_name(frontmatter: Dict, category: str) -> str:
 
 
 def extract_frontmatter(content: str) -> Dict:
-    """Извлекает YAML frontmatter из Markdown контента."""
     match = re.match(PATTERNS['frontmatter'], content, re.DOTALL | re.MULTILINE)
     if not match:
         return {}
@@ -513,7 +1164,6 @@ def extract_frontmatter(content: str) -> Dict:
 
 
 def extract_scheduling_data(content: str) -> Optional[SchedulingData]:
-    """Извлекает данные планирования из HTML комментария."""
     match = re.search(PATTERNS['scheduling_comment'], content)
     if match:
         return SchedulingData(
@@ -525,7 +1175,6 @@ def extract_scheduling_data(content: str) -> Optional[SchedulingData]:
 
 
 def extract_card_metadata(content: str) -> Tuple[str, Dict]:
-    """Извлекает метаданные карточки из контента."""
     frontmatter = extract_frontmatter(content)
 
     category = frontmatter.get('category', 'general')
@@ -537,12 +1186,7 @@ def extract_card_metadata(content: str) -> Tuple[str, Dict]:
     return category, frontmatter
 
 
-# =============================================================================
-# Парсинг карточек разных форматов
-# =============================================================================
-
 def detect_card_format(line: str) -> Optional[CardType]:
-    """Определяет тип карточки по формату строки."""
     line = line.strip()
 
     if re.match(PATTERNS['single_line_bidirectional'], line):
@@ -555,7 +1199,6 @@ def detect_card_format(line: str) -> Optional[CardType]:
 
 
 def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
-    """Парсит cloze deletions из текста."""
     deletions: List[ClozeDeletion] = []
 
     for match in re.finditer(r'==(.+?)==\[\^([ahs]+)\]', text):
@@ -597,12 +1240,10 @@ def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
 
 
 def has_cloze_deletions(text: str) -> bool:
-    """Проверяет наличие cloze deletions в тексте."""
     return bool(re.search(r'==.+?==', text, re.DOTALL))
 
 
 def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
-    """Парсит карточки из Markdown в исходном порядке документа."""
     cards: List[InterviewCard] = []
     card_id = start_id
 
@@ -658,7 +1299,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             i += 1
             continue
 
-        # 1. Legacy
         if is_legacy_question_block(block):
             full_block_parts = [block]
             j = i + 1
@@ -702,7 +1342,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             i = j
             continue
 
-        # 2. Single-line карточки
         if contains_single_line_card_syntax(block):
             in_code_block = False
 
@@ -789,7 +1428,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             i += 1
             continue
 
-        # 3. Multi-line карточки
         multiline_parts = split_multiline_block(block)
         if multiline_parts:
             separator, part1, part2 = multiline_parts
@@ -882,7 +1520,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
             i = j
             continue
 
-        # 4. Standalone Cloze
         if is_standalone_cloze_block(block):
             add_cloze_card(block, extract_scheduling_data(block))
             i += 1
@@ -890,7 +1527,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
 
         i += 1
 
-    # 5. Финальная валидация
     for card in all_cards:
         try:
             if card.validate():
@@ -901,7 +1537,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                 f"не прошла валидацию: {e}"
             )
 
-    # 6. Fallback
     if not cards:
         logger.info(
             f"Структурированные вопросы не найдены в {topic_name}, "
@@ -938,7 +1573,6 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
 
 
 def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
-    """Парсит все Markdown файлы в директории."""
     all_cards: List[InterviewCard] = []
     card_id = 1
 
@@ -957,12 +1591,7 @@ def parse_all_markdown_files(input_dir: str) -> List[InterviewCard]:
     return all_cards
 
 
-# =============================================================================
-# Очистка и форматирование текста
-# =============================================================================
-
 def clean_text(text: str) -> str:
-    """Очищает текст от лишних пробелов и переносов строк."""
     if not text:
         return ""
     text = re.sub(r'\s+', ' ', text)
@@ -971,7 +1600,6 @@ def clean_text(text: str) -> str:
 
 
 def escape_html(text: str) -> str:
-    """Экранирует HTML-символы для Anki."""
     if not text:
         return ""
     text = text.replace('&', '&amp;')
@@ -982,43 +1610,32 @@ def escape_html(text: str) -> str:
 
 
 def escape_for_tsv(text: str) -> str:
-    """
-    Экранирует текст для TSV-формата Anki.
-    КРИТИЧНО: каждая карточка ДОЛЖНА быть на одной строке файла.
-    Все переносы строк заменяются на <br>.
-    """
     if not text:
         return ""
-    # Табуляция — разделитель колонок в TSV
+
     text = text.replace('\t', '    ')
-    # ВСЕ переносы строк → HTML <br>
+
     text = text.replace('\r\n', '<br>')
     text = text.replace('\r', '<br>')
     text = text.replace('\n', '<br>')
-    # Убираем множественные <br>
+
     while '<br><br><br>' in text:
         text = text.replace('<br><br><br>', '<br><br>')
     return text
 
 
 def format_code_for_anki(code: str, language: str = 'text') -> str:
-    """
-    Форматирует код с подсветкой синтаксиса (Pygments + Monokai) для Anki.
-    Возвращает HTML БЕЗ символов \\n — всё в одну строку.
-    """
     if not code:
         return ""
 
     code = code.strip()
     language = language.strip().lower() if language else 'text'
 
-    # Подбор лексера
     try:
         lexer = get_lexer_by_name(language, stripall=True)
     except Exception:
         lexer = TextLexer(stripall=True)
 
-    # Подсветка: inline CSS, без обёрток
     formatter = HtmlFormatter(
         noclasses=True,
         nowrap=True,
@@ -1029,7 +1646,6 @@ def format_code_for_anki(code: str, language: str = 'text') -> str:
     highlighted = highlighted.strip()
     highlighted = highlighted.replace('\n', '<br>')
 
-    # Плашка языка
     lang_colors = {
         'python': '#306998', 'javascript': '#f7df1e',
         'typescript': '#3178c6', 'java': '#ed8b00',
@@ -1061,7 +1677,6 @@ def format_code_for_anki(code: str, language: str = 'text') -> str:
         f'{highlighted}</pre></div>'
     )
 
-    # Гарантируем одну строку для TSV
     result = result.replace('\n', '')
     result = result.replace('\r', '')
 
@@ -1069,10 +1684,6 @@ def format_code_for_anki(code: str, language: str = 'text') -> str:
 
 
 def format_markdown_to_html(text: str) -> str:
-    """
-    Конвертирует Markdown в HTML (базовая версия).
-    Для Anki экспорта лучше использовать format_markdown_to_anki_html().
-    """
     if not text:
         return ""
 
@@ -1101,21 +1712,15 @@ def format_markdown_to_html(text: str) -> str:
 
 
 def format_markdown_to_anki_html(text: str) -> str:
-    """
-    Конвертирует Markdown в HTML для Anki.
-    Кодовые блоки подсвечиваются через Pygments (Monokai).
-    """
     if not text:
         return ""
 
     result = text
 
-    # Нормализация отступов у ```
     result = re.sub(
         r'^[ \t]+(```)', r'\1', result, flags=re.MULTILINE,
     )
 
-    # ─── 1. Защита fenced code blocks ────────────
     code_blocks: List[Tuple[str, str]] = []
 
     def _save_code_block(m):
@@ -1139,7 +1744,6 @@ def format_markdown_to_anki_html(text: str) -> str:
     )
     result = re.sub(r'```\s*\w*\s*', '', result)
 
-    # ─── 2. Защита inline code ───────────────────
     inline_codes: List[str] = []
 
     def _save_inline(m):
@@ -1151,7 +1755,6 @@ def format_markdown_to_anki_html(text: str) -> str:
     result = re.sub(r'`([^`\n]+)`', _save_inline, result)
     result = re.sub(r'`+', '', result)
 
-    # ─── 3. Markdown → HTML ──────────────────────
     result = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', result)
     result = re.sub(
         r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', result,
@@ -1178,7 +1781,6 @@ def format_markdown_to_anki_html(text: str) -> str:
         r'^-{3,}\s*$', '<hr>', result, flags=re.MULTILINE,
     )
 
-    # Blockquote
     lines = result.split('\n')
     processed: List[str] = []
     in_bq = False
@@ -1201,7 +1803,6 @@ def format_markdown_to_anki_html(text: str) -> str:
         processed.append('</blockquote>')
     result = '\n'.join(processed)
 
-    # Списки
     result = _convert_lists_to_html(result)
 
     result = re.sub(
@@ -1209,7 +1810,6 @@ def format_markdown_to_anki_html(text: str) -> str:
         result, flags=re.MULTILINE,
     )
 
-    # ─── 4. Переносы → <br> ─────────────────────
     result = result.replace('\n\n', '<br><br>')
     result = result.replace('\n', '<br>')
     result = re.sub(r'(<br>){3,}', '<br><br>', result)
@@ -1222,7 +1822,6 @@ def format_markdown_to_anki_html(text: str) -> str:
         rf'<br>(</?{block_tags}[^>]*>)', r'\1', result,
     )
 
-    # ─── 5. Восстановление inline code ──────────
     for idx, code_text in enumerate(inline_codes):
         escaped = escape_html(code_text)
         styled = (
@@ -1233,7 +1832,6 @@ def format_markdown_to_anki_html(text: str) -> str:
         )
         result = result.replace(f"\x00IC{idx}\x00", styled)
 
-    # ─── 6. Восстановление code blocks ──────────
     for idx, (lang, code_content) in enumerate(code_blocks):
         formatted = format_code_for_anki(code_content, lang)
         result = result.replace(f"\x00CB{idx}\x00", formatted)
@@ -1242,7 +1840,6 @@ def format_markdown_to_anki_html(text: str) -> str:
 
 
 def _convert_lists_to_html(text: str) -> str:
-    """Конвертирует маркированные списки Markdown в <ul>/<li>."""
     lines = text.split('\n')
     result_lines: List[str] = []
     in_list = False
@@ -1273,7 +1870,6 @@ def _convert_lists_to_html(text: str) -> str:
 
 
 def remove_obsidian_links(text: str) -> str:
-    """Удаляет ссылки Obsidian для чистого Anki экспорта."""
     if not text:
         return ""
     text = re.sub(r'\[\[.*?\|(.+?)\]\]', r'\1', text)
@@ -1282,7 +1878,6 @@ def remove_obsidian_links(text: str) -> str:
 
 
 def remove_spaced_repetition_tags(text: str) -> str:
-    """Удаляет теги Spaced Repetition для Anki."""
     if not text:
         return ""
     text = re.sub(r'#interview\s*', '', text)
@@ -1291,24 +1886,7 @@ def remove_spaced_repetition_tags(text: str) -> str:
     return text.strip()
 
 
-# =============================================================================
-# Конвертация Cloze для Anki
-# =============================================================================
-
 def convert_cloze_to_anki_format(text: str) -> str:
-    """
-    Конвертирует Obsidian Spaced Repetition cloze-формат
-    в нативный формат Anki.
-
-    Преобразования:
-      ==text==^[hint][^N]  →  {{cN::text::hint}}
-      ==text==^[hint]      →  {{cN::text::hint}}
-      ==text==[^actions]   →  {{cN::text}}
-      ==text==             →  {{cN::text}}
-
-    Номера cloze (cN) присваиваются автоматически.
-    Карточки с одинаковым [^N] получают одинаковый номер.
-    """
     if not text or '==' not in text:
         return text
 
@@ -1316,7 +1894,6 @@ def convert_cloze_to_anki_format(text: str) -> str:
     cloze_counter = [0]
     seq_to_num: Dict[int, int] = {}
 
-    # Защищаем кодовые блоки от конвертации
     code_blocks: List[str] = []
 
     def _save_code(m):
@@ -1327,7 +1904,6 @@ def convert_cloze_to_anki_format(text: str) -> str:
     result = re.sub(r'```.*?```', _save_code, result, flags=re.DOTALL)
     result = re.sub(r'`[^`]+`', _save_code, result)
 
-    # 1. ==text==^[hint][^seq] → {{cN::text::hint}}
     def _replace_seq_hint(m):
         content = m.group(1)
         hint = m.group(2)
@@ -1344,7 +1920,6 @@ def convert_cloze_to_anki_format(text: str) -> str:
         r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]', _replace_seq_hint, result
     )
 
-    # 2. ==text==^[hint] → {{cN::text::hint}}
     def _replace_hint(m):
         content = m.group(1)
         hint = m.group(2)
@@ -1357,7 +1932,6 @@ def convert_cloze_to_anki_format(text: str) -> str:
         r'==(.+?)==\^\[([^\]]*)\](?!\[\^)', _replace_hint, result
     )
 
-    # 3. ==text==[^actions] → {{cN::text}}
     def _replace_actions(m):
         cloze_counter[0] += 1
         return f"{{{{c{cloze_counter[0]}::{m.group(1)}}}}}"
@@ -1366,14 +1940,12 @@ def convert_cloze_to_anki_format(text: str) -> str:
         r'==(.+?)==\[\^([ahs]+)\]', _replace_actions, result
     )
 
-    # 4. ==text== → {{cN::text}}
     def _replace_simple(m):
         cloze_counter[0] += 1
         return f"{{{{c{cloze_counter[0]}::{m.group(1)}}}}}"
 
     result = re.sub(r'==(.+?)==', _replace_simple, result)
 
-    # Восстанавливаем кодовые блоки
     for idx, block in enumerate(code_blocks):
         result = result.replace(f"\x02CODEPROTECT{idx}\x02", block)
 
@@ -1381,13 +1953,6 @@ def convert_cloze_to_anki_format(text: str) -> str:
 
 
 def generate_card_guid(card: InterviewCard) -> str:
-    """
-    Генерирует стабильный GUID для карточки Anki.
-
-    Основан на содержимом карточки, поэтому при повторном
-    экспорте одинаковых карточек GUID сохраняется.
-    Это позволяет Anki распознавать дубликаты при импорте.
-    """
     key = (
         f"{card.topic}|{card.question[:200]}|"
         f"{card.card_type.value}|{card.is_reverse}"
@@ -1395,17 +1960,12 @@ def generate_card_guid(card: InterviewCard) -> str:
     return hashlib.md5(key.encode('utf-8')).hexdigest()[:12]
 
 
-# =============================================================================
-# Генерация карточек для Obsidian Spaced Repetition
-# =============================================================================
-
 def generate_obsidian_topic_file(
         cards: List[InterviewCard],
         topic_name: str,
         output_dir: str,
         deck_name: str = None
 ) -> str:
-    """Генерирует объединённый файл темы для Obsidian Spaced Repetition."""
     os.makedirs(output_dir, exist_ok=True)
 
     if not deck_name and cards:
@@ -1490,15 +2050,7 @@ def generate_obsidian_topic_file(
     return file_path
 
 
-# =============================================================================
-# Генерация карточек для Anki (УЛУЧШЕННАЯ ВЕРСИЯ)
-# =============================================================================
-
 def _clean_text_for_anki(text: str) -> str:
-    """
-    Очищает текст от Obsidian-артефактов для Anki.
-    Применяет все необходимые очистки перед HTML-конвертацией.
-    """
     if not text:
         return ""
     text = remove_scheduling_comment(text)
@@ -1508,10 +2060,6 @@ def _clean_text_for_anki(text: str) -> str:
 
 
 def _build_source_html(card: InterviewCard) -> str:
-    """
-    HTML-блок ссылки на источник.
-    Без переносов строк — весь HTML в одну строку.
-    """
     if not card.source_note:
         return ""
     name = escape_html(card.source_note)
@@ -1522,18 +2070,13 @@ def _build_source_html(card: InterviewCard) -> str:
 
 
 def _format_tags_for_anki(card: InterviewCard) -> str:
-    """
-    Форматирует теги карточки для Anki.
-    Anki-теги не используют #, разделяются пробелами.
-    """
     tag_values = normalize_tags(card.tags)
     result = []
     for tag in tag_values:
-        # Убираем #, заменяем пробелы на _
         clean = tag.lstrip('#').strip().replace(' ', '_')
         if clean:
             result.append(clean)
-    # Добавляем категорию как тег
+
     if card.category and card.category not in result:
         result.append(card.category)
     return ' '.join(result)
@@ -1544,10 +2087,6 @@ def _write_anki_basic_file(
         file_path: str,
         deck_name: str,
 ) -> None:
-    """
-    Basic (:: и ?) → одно направление: Front → Back.
-    Каждая карточка СТРОГО на одной строке.
-    """
     header_lines = [
         "#separator:tab",
         "#html:true",
@@ -1565,7 +2104,6 @@ def _write_anki_basic_file(
         front = format_markdown_to_anki_html(front_raw)
         back = format_markdown_to_anki_html(back_raw)
 
-        # Дополнительные code snippets
         if card.code_snippets:
             for snippet in card.code_snippets:
                 norm_snippet = ' '.join(snippet.split())
@@ -1573,21 +2111,16 @@ def _write_anki_basic_file(
                 if norm_snippet not in norm_back:
                     back += format_code_for_anki(snippet)
 
-        # Источник — только на Back
         back += _build_source_html(card)
 
-        # Финальная очистка — гарантируем одну строку
         front = escape_for_tsv(front)
         back = escape_for_tsv(back)
         tags = _format_tags_for_anki(card)
 
         line = f"{front}\t{back}\t{tags}"
-
-        # Проверка: строка не содержит переносов
         assert '\n' not in line, (
             f"Newline in card line! card_id={card.id}"
         )
-
         card_lines.append(line)
 
     content = '\n'.join(header_lines) + '\n' + '\n'.join(card_lines) + '\n'
@@ -1601,17 +2134,6 @@ def _write_anki_reversed_file(
         file_path: str,
         deck_name: str,
 ) -> None:
-    """
-    Bidirectional (::: и ??) → Anki создаёт оба направления.
-
-    Note type: Basic (and reversed card)
-    Anki автоматически генерирует:
-      Card 1: Front → Back
-      Card 2: Back → Front
-
-    Источник добавляется ТОЛЬКО в Back.
-    Принимает только карточки с is_reverse=False.
-    """
     header_lines = [
         "#separator:tab",
         "#html:true",
@@ -1629,7 +2151,6 @@ def _write_anki_reversed_file(
         front = format_markdown_to_anki_html(front_raw)
         back = format_markdown_to_anki_html(back_raw)
 
-        # Code snippets — только в Back
         if card.code_snippets:
             for snippet in card.code_snippets:
                 norm_snippet = ' '.join(snippet.split())
@@ -1637,10 +2158,8 @@ def _write_anki_reversed_file(
                 if norm_snippet not in norm_back:
                     back += format_code_for_anki(snippet)
 
-        # Источник — ТОЛЬКО в Back
         back += _build_source_html(card)
 
-        # Финальная очистка
         front = escape_for_tsv(front)
         back = escape_for_tsv(back)
         tags = _format_tags_for_anki(card)
@@ -1649,7 +2168,6 @@ def _write_anki_reversed_file(
         assert '\n' not in line, (
             f"Newline in reversed card! card_id={card.id}"
         )
-
         card_lines.append(line)
 
     content = '\n'.join(header_lines) + '\n' + '\n'.join(card_lines) + '\n'
@@ -1663,9 +2181,6 @@ def _write_anki_cloze_file(
         file_path: str,
         deck_name: str,
 ) -> None:
-    """
-    Cloze (==text==) → {{c1::text}} для Anki.
-    """
     header_lines = [
         "#separator:tab",
         "#html:true",
@@ -1682,10 +2197,8 @@ def _write_anki_cloze_file(
         cloze_raw = remove_obsidian_links(cloze_raw)
         cloze_raw = remove_spaced_repetition_tags(cloze_raw)
 
-        # ==text== → {{c1::text}}
         anki_cloze = convert_cloze_to_anki_format(cloze_raw)
 
-        # Защищаем cloze-маркеры от HTML-конвертации
         cloze_markers: List[str] = []
 
         def _save_cloze(m, markers=cloze_markers):
@@ -1700,14 +2213,11 @@ def _write_anki_cloze_file(
             flags=re.DOTALL,
         )
 
-        # Markdown → HTML
         html_text = format_markdown_to_anki_html(protected)
 
-        # Восстанавливаем cloze-маркеры
         for idx, marker in enumerate(cloze_markers):
             html_text = html_text.replace(f"\x01CL{idx}\x01", marker)
 
-        # Back Extra
         back_extra = _build_source_html(card)
 
         html_text = escape_for_tsv(html_text)
@@ -1718,7 +2228,6 @@ def _write_anki_cloze_file(
         assert '\n' not in line, (
             f"Newline in cloze card! card_id={card.id}"
         )
-
         card_lines.append(line)
 
     content = '\n'.join(header_lines) + '\n' + '\n'.join(card_lines) + '\n'
@@ -1734,32 +2243,6 @@ def generate_anki_import_file(
         deck_prefix: str = "Interview",
         use_reverse_cards: bool = True,
 ) -> List[str]:
-    """
-    Генерирует файл(ы) для импорта в Anki.
-
-    Создаёт раздельные файлы для каждого Anki note type:
-    - Basic: для однонаправленных карточек (:: и ?)
-    - Basic (and reversed card): для двунаправленных (::: и ??)
-    - Cloze: для карточек с пропусками (==text==)
-
-    Маппинг Obsidian SR → Anki:
-      Single-line Basic (::)          → Basic
-      Multi-line Basic (?)            → Basic
-      Single-line Bidirectional (:::) → Basic (and reversed card)
-      Multi-line Bidirectional (??)   → Basic (and reversed card)
-      Cloze (==text==)                → Cloze
-
-    Args:
-        cards: Список карточек
-        topic_name: Имя темы
-        output_path: Путь к выходному файлу или директории
-        deck_prefix: Префикс имени колоды
-        use_reverse_cards: True — bidirectional → "Basic (and reversed card)"
-                           False — bidirectional → "Basic" (одно направление)
-
-    Returns:
-        List[str]: Список путей к созданным файлам
-    """
     output_dir = (
         output_path
         if os.path.isdir(output_path)
@@ -1772,18 +2255,15 @@ def generate_anki_import_file(
     if not cards:
         return created_files
 
-    # ─── Определяем имя колоды ───────────────────
     if cards[0].deck_name:
         deck_name = cards[0].deck_name.replace('/', '::')
     else:
         category = cards[0].category
         deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
 
-    # Гарантируем что flashcards → Flashcards::...
     if deck_name.startswith('flashcards'):
         deck_name = deck_name.replace('flashcards', 'Interview Cards', 1)
 
-    # ─── Разделяем карточки по Anki note types ───
     basic_cards: List[InterviewCard] = [
         c for c in cards
         if c.card_type in BASIC_CARD_TYPES
@@ -1797,15 +2277,12 @@ def generate_anki_import_file(
     reversed_cards: List[InterviewCard] = []
 
     if use_reverse_cards:
-        # Bidirectional → "Basic (and reversed card)"
-        # Берём только is_reverse=False, Anki сам создаст обратную
         reversed_cards = [
             c for c in cards
             if c.card_type in BIDIRECTIONAL_CARD_TYPES
                and not c.is_reverse
         ]
     else:
-        # Bidirectional → обычный "Basic" (одно направление)
         extra_basic = [
             c for c in cards
             if c.card_type in BIDIRECTIONAL_CARD_TYPES
@@ -1813,7 +2290,6 @@ def generate_anki_import_file(
         ]
         basic_cards.extend(extra_basic)
 
-    # ─── Генерация файлов ────────────────────────
     if basic_cards:
         basic_path = os.path.join(
             output_dir, f"{topic_name}_anki_basic.txt"
@@ -1837,7 +2313,6 @@ def generate_anki_import_file(
             f"({len(reversed_cards)} карт. × 2 направления)"
         )
 
-    # Генерация файла Cloze
     if cloze_cards:
         cloze_path = os.path.join(
             output_dir, f"{topic_name}_anki_cloze.txt"
@@ -1852,19 +2327,7 @@ def generate_anki_import_file(
     return created_files
 
 
-# =============================================================================
-# Утилиты
-# =============================================================================
-
 def clean_up_duplicates(file_paths: List[str]) -> int:
-    """
-    Удаляет дубликаты карточек из файлов Anki.
-
-    Дедупликация по первому столбцу (Front для Basic, Text для Cloze)
-    с учётом кросс-файловых дубликатов.
-
-    Не требует pandas — работает через чтение строк.
-    """
     if not file_paths:
         return 0
 
@@ -1919,8 +2382,6 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
 
 
 def natural_sort(file_paths: List[str]) -> List[str]:
-    """Естественная сортировка файлов."""
-
     def natural_key(text: str) -> List:
         return [
             int(c) if c.isdigit() else c.lower()
@@ -1931,7 +2392,6 @@ def natural_sort(file_paths: List[str]) -> List[str]:
 
 
 def get_markdown_files(folder_paths: List[str]) -> List[str]:
-    """Получает список Markdown файлов из папок."""
     file_paths: List[str] = []
 
     for folder_path in folder_paths:
@@ -1945,7 +2405,6 @@ def get_markdown_files(folder_paths: List[str]) -> List[str]:
 
 
 def validate_markdown_structure(content: str) -> bool:
-    """Проверяет структуру Markdown на наличие карточек."""
     has_single_basic = bool(re.search(r'[^:]::[^:]', content))
     has_single_bidirectional = bool(re.search(r':::', content))
     has_multi_basic = bool(re.search(r'\n\?\n', content))
@@ -1967,7 +2426,6 @@ def process_cards_batch(
         batch_size: int = 500,
         use_reverse_cards: bool = True,
 ) -> List[str]:
-    """Обрабатывает карточки батчами для больших наборов данных."""
     output_files: List[str] = []
 
     for i in range(0, len(cards), batch_size):
@@ -2000,18 +2458,6 @@ def generate_all_formats(
         use_reverse_cards: bool = True,
         formats: str = "both",
 ) -> List[str]:
-    """
-    Генерирует выбранные форматы вывода карточек.
-
-    Для Obsidian SR:
-      - Reverse-карточки исключаются (синтаксис ::: и ?? сам
-        создаёт двунаправленность)
-
-    Для Anki:
-      - Все карточки передаются в generate_anki_import_file
-      - Разделение на note types и обработка reverse
-        происходит внутри этой функции
-    """
     output_files: List[str] = []
 
     if not cards:
@@ -2029,9 +2475,7 @@ def generate_all_formats(
         f"Форматы: {formats})"
     )
 
-    # ─── Obsidian SR ─────────────────────────────
     if gen_obsidian:
-        # Без reverse: синтаксис ::: и ?? сам двунаправленный
         obsidian_cards = [c for c in cards if not c.is_reverse]
 
         if obsidian_cards:
@@ -2044,13 +2488,9 @@ def generate_all_formats(
             )
             output_files.append(merged_file)
 
-    # ─── Anki ────────────────────────────────────
     if gen_anki:
         os.makedirs(anki_output, exist_ok=True)
 
-        # Передаём все карточки —
-        # generate_anki_import_file сам разделит по note types
-        # и отфильтрует reverse для bidirectional
         anki_files = generate_anki_import_file(
             cards,
             topic_name,
