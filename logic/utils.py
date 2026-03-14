@@ -362,11 +362,8 @@ def validate_file_formats(file_path: str) -> FileValidationReport:
     # --- 3. Смешение форматов на уровне файла ---
     _check_format_mixing(all_formats, report)
 
-    # --- 3b. Смешение форматов внутри блоков ---
-    _check_cloze_with_separator_conflict(lines, report)
-
-    # --- 3c. Смешение cloze с :: и ::: ---
-    _check_inline_format_conflicts(lines, report)
+    # --- 3b. Все конфликты на уровне блоков ---
+    _check_block_level_conflicts(lines, report)
 
     # --- 4. Подсчёт карточек ---
     try:
@@ -613,15 +610,42 @@ def _check_format_mixing(
         ))
 
 
-def _check_cloze_with_separator_conflict(
+def _check_block_level_conflicts(
         lines: List[str],
         report: FileValidationReport,
 ) -> None:
-    """Проверяет конфликт cloze-разметки с разделителями ? и ?? в одном блоке.
+    """Комплексная проверка конфликтов форматов внутри блоков.
 
-    Ситуация: строка содержит ==cloze==, а следующая/предыдущая строка —
-    разделитель ? или ??. Парсер интерпретирует это как multi-line карточку,
-    а cloze-разметка теряется или обрабатывается неожиданно.
+    Проверяет все комбинации смешения:
+    - cloze (==...==) внутри :: / ::: / ? / ?? / legacy блоков
+    - :: / ::: внутри ? / ?? блоков (вопрос и ответ)
+    - :: / ::: на одной строке
+    - legacy + другие форматы
+    - несколько разделителей без разграничения блоков
+    """
+    in_code_block = False
+    in_frontmatter = False
+
+    # --- Фаза 1: Проверка конфликтов вокруг ? и ?? ---
+    _check_separator_block_conflicts(lines, report)
+
+    # --- Фаза 2: Проверка конфликтов внутри однострочных :: и ::: ---
+    _check_single_line_internal_conflicts(lines, report)
+
+    # --- Фаза 3: Проверка конфликтов в legacy блоках ---
+    _check_legacy_block_conflicts(lines, report)
+
+    # --- Фаза 4: Проверка смежных разделителей без разграничения ---
+    _check_adjacent_separators(lines, report)
+
+    # --- Фаза 5: Проверка :: и ::: на одной строке ---
+    _check_double_separator_on_line(lines, report)
+
+
+def _iter_content_lines(lines: List[str]):
+    """Итерирует строки контента, пропуская frontmatter и блоки кода.
+
+    Yields: (line_idx, line_num, stripped_line, is_in_code_block)
     """
     in_code_block = False
     in_frontmatter = False
@@ -630,7 +654,6 @@ def _check_cloze_with_separator_conflict(
         line_num = line_idx + 1
         stripped = line.strip()
 
-        # Пропуск frontmatter
         if line_idx == 0 and stripped == '---':
             in_frontmatter = True
             continue
@@ -639,157 +662,245 @@ def _check_cloze_with_separator_conflict(
                 in_frontmatter = False
             continue
 
-        # Пропуск блоков кода
         if stripped.startswith('```'):
             in_code_block = not in_code_block
             continue
+
         if in_code_block:
             continue
 
-        # Ищем разделитель ? или ??
+        yield line_idx, line_num, stripped
+
+
+def _strip_inline_code(text: str) -> str:
+    """Убирает inline-код из строки для анализа разметки."""
+    return re.sub(r'`[^`]*`', '', text)
+
+
+def _has_cloze(text: str) -> bool:
+    """Проверяет наличие cloze-разметки (без inline-кода)."""
+    clean = _strip_inline_code(text)
+    return bool(re.search(r'==(?=\S).+?(?<=\S)==', clean))
+
+
+def _has_basic_sep(text: str) -> bool:
+    """Проверяет наличие :: (не :::) разделителя (без inline-кода)."""
+    clean = _strip_inline_code(text)
+    if ':::' in clean:
+        return False
+    if '::' not in clean:
+        return False
+    parts = clean.split('::', 1)
+    return len(parts) == 2 and bool(parts[0].strip()) and bool(parts[1].strip())
+
+
+def _has_bidi_sep(text: str) -> bool:
+    """Проверяет наличие ::: разделителя (без inline-кода)."""
+    clean = _strip_inline_code(text)
+    if ':::' not in clean:
+        return False
+    parts = clean.split(':::', 1)
+    return len(parts) == 2 and bool(parts[0].strip()) and bool(parts[1].strip())
+
+
+def _collect_block_around_separator(
+        lines: List[str],
+        sep_line_idx: int,
+) -> tuple:
+    """Собирает строки вопроса (выше) и ответа (ниже) вокруг разделителя ? или ??.
+
+    Returns:
+        (question_lines, answer_lines)
+        Каждый элемент — список кортежей (line_num, stripped_text)
+    """
+    question_lines = []
+    check_idx = sep_line_idx - 1
+    in_code = False
+
+    while check_idx >= 0:
+        prev = lines[check_idx].strip()
+        if prev.startswith('```'):
+            in_code = not in_code
+            check_idx -= 1
+            continue
+        if in_code:
+            check_idx -= 1
+            continue
+        if not prev:
+            break
+        if prev == '---':
+            break
+        if prev.startswith('#'):
+            break
+        question_lines.insert(0, (check_idx + 1, prev))
+        check_idx -= 1
+
+    answer_lines = []
+    check_idx = sep_line_idx + 1
+    in_code = False
+
+    while check_idx < len(lines):
+        nxt = lines[check_idx].strip()
+        if nxt.startswith('```'):
+            in_code = not in_code
+            answer_lines.append((check_idx + 1, nxt))
+            check_idx += 1
+            continue
+        if in_code:
+            answer_lines.append((check_idx + 1, nxt))
+            check_idx += 1
+            continue
+        if not nxt:
+            break
+        if nxt == '---':
+            break
+        if nxt.startswith('#'):
+            break
+        answer_lines.append((check_idx + 1, nxt))
+        check_idx += 1
+
+    return question_lines, answer_lines
+
+
+def _check_separator_block_conflicts(
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет конфликты вокруг разделителей ? и ??:
+    - cloze в вопросе или ответе
+    - :: в вопросе или ответе
+    - ::: в вопросе или ответе
+    """
+    for line_idx, line_num, stripped in _iter_content_lines(lines):
         if stripped not in ('?', '??'):
             continue
 
         separator = stripped
+        question_lines, answer_lines = _collect_block_around_separator(
+            lines, line_idx,
+        )
 
-        # Собираем блок «вопроса» (строки выше разделителя до пустой строки)
-        question_lines = []
-        check_idx = line_idx - 1
-        while check_idx >= 0:
-            prev_line = lines[check_idx].strip()
-            if not prev_line:
-                break
-            if prev_line == '---':
-                break
-            if prev_line.startswith('#'):
-                break
-            question_lines.insert(0, (check_idx + 1, prev_line))
-            check_idx -= 1
+        all_block_lines = question_lines + answer_lines
 
-        # Собираем блок «ответа» (строки ниже разделителя до пустой строки)
-        answer_lines = []
-        check_idx = line_idx + 1
-        while check_idx < len(lines):
-            next_line = lines[check_idx].strip()
-            if not next_line:
-                break
-            if next_line == '---':
-                break
-            if next_line.startswith('#'):
-                break
-            answer_lines.insert(len(answer_lines), (check_idx + 1, next_line))
-            check_idx += 1
+        for block_ln, block_text in all_block_lines:
+            is_question = any(ln == block_ln for ln, _ in question_lines)
+            side = "вопросе" if is_question else "ответе"
 
-        # Проверяем: есть ли ==cloze== в вопросе или ответе
-        # (убираем inline-код из проверки)
-        for block_line_num, block_line in question_lines + answer_lines:
-            text_no_code = re.sub(r'`[^`]*`', '', block_line)
-            if re.search(r'==(?=\S).+?(?<=\S)==', text_no_code):
+            # --- Cloze внутри ? / ?? блока ---
+            if _has_cloze(block_text):
                 report.issues.append(FormatIssue(
                     severity='warning',
-                    line_number=block_line_num,
-                    line_text=block_line,
+                    line_number=block_ln,
+                    line_text=block_text,
                     message=(
-                        f"Cloze-разметка (==...==) в блоке "
-                        f"с разделителем '{separator}' (строка {line_num}). "
+                        f"Cloze-разметка (==...==) в {side} "
+                        f"блока с разделителем '{separator}' "
+                        f"(строка {line_num}). "
                         f"Парсер обработает это как multi-line карточку, "
-                        f"а не как cloze-пропуск."
+                        f"cloze-пропуски могут быть потеряны."
                     ),
                     suggestion=(
-                        "Если нужна cloze-карточка — уберите разделитель "
-                        f"'{separator}' и оставьте только текст с ==...==. "
-                        "Если нужна Q&A карточка — уберите == из текста."
+                        f"Если нужна Cloze — уберите '{separator}' "
+                        f"и оставьте текст с ==...== как отдельный блок. "
+                        f"Если нужна Q&A — уберите == из текста."
                     ),
                 ))
 
-        # Проверяем: есть ли :: или ::: в вопросе
-        for block_line_num, block_line in question_lines:
-            text_no_code = re.sub(r'`[^`]*`', '', block_line)
-            if ':::' in text_no_code:
-                parts = text_no_code.split(':::', 1)
-                if parts[0].strip() and parts[1].strip():
-                    report.issues.append(FormatIssue(
-                        severity='warning',
-                        line_number=block_line_num,
-                        line_text=block_line,
-                        message=(
-                            f"Bidirectional-разметка (:::) в блоке "
-                            f"с разделителем '{separator}' (строка {line_num}). "
-                            f"Неоднозначность: парсер может обработать "
-                            f"как ::: или как '{separator}'."
-                        ),
-                        suggestion=(
-                            "Используйте только один формат: "
-                            "либо ::: (однострочный), либо "
-                            f"'{separator}' (многострочный)."
-                        ),
-                    ))
-            elif '::' in text_no_code and ':::' not in text_no_code:
-                parts = text_no_code.split('::', 1)
-                if parts[0].strip() and parts[1].strip():
-                    report.issues.append(FormatIssue(
-                        severity='warning',
-                        line_number=block_line_num,
-                        line_text=block_line,
-                        message=(
-                            f"Basic-разметка (::) в блоке "
-                            f"с разделителем '{separator}' (строка {line_num}). "
-                            f"Неоднозначность формата."
-                        ),
-                        suggestion=(
-                            "Используйте только один формат: "
-                            "либо :: (однострочный), либо "
-                            f"'{separator}' (многострочный)."
-                        ),
-                    ))
+            # --- :: внутри вопроса ? / ?? блока ---
+            if is_question and _has_basic_sep(block_text):
+                report.issues.append(FormatIssue(
+                    severity='warning',
+                    line_number=block_ln,
+                    line_text=block_text,
+                    message=(
+                        f"Basic-разделитель (::) в {side} блока "
+                        f"с '{separator}' (строка {line_num}). "
+                        f"Парсер может обработать строку как "
+                        f"single-line Basic вместо multi-line."
+                    ),
+                    suggestion=(
+                        f"Используйте один формат: "
+                        f"либо :: (однострочный), "
+                        f"либо '{separator}' (многострочный). "
+                        f"Если :: — часть текста, оберните в `inline code`."
+                    ),
+                ))
+
+            # --- ::: внутри вопроса ? / ?? блока ---
+            if is_question and _has_bidi_sep(block_text):
+                report.issues.append(FormatIssue(
+                    severity='warning',
+                    line_number=block_ln,
+                    line_text=block_text,
+                    message=(
+                        f"Bidirectional-разделитель (:::) в {side} блока "
+                        f"с '{separator}' (строка {line_num}). "
+                        f"Парсер может обработать строку как "
+                        f"single-line Bidirectional вместо multi-line."
+                    ),
+                    suggestion=(
+                        f"Используйте один формат: "
+                        f"либо ::: (однострочный), "
+                        f"либо '{separator}' (многострочный). "
+                        f"Если ::: — часть текста, оберните в `inline code`."
+                    ),
+                ))
+
+            # --- :: в ответе ? / ?? блока ---
+            #     (менее критично, но может запутать при редактировании)
+            if not is_question and _has_basic_sep(block_text):
+                report.issues.append(FormatIssue(
+                    severity='info',
+                    line_number=block_ln,
+                    line_text=block_text,
+                    message=(
+                        f"Разделитель '::' в ответе блока "
+                        f"с '{separator}' (строка {line_num}). "
+                        f"Сейчас обрабатывается корректно, но может "
+                        f"запутать при редактировании."
+                    ),
+                    suggestion=(
+                        f"Если :: — часть текста (не разделитель карточки), "
+                        f"оберните в `inline code` для ясности."
+                    ),
+                ))
+
+            # --- ::: в ответе ? / ?? блока ---
+            if not is_question and _has_bidi_sep(block_text):
+                report.issues.append(FormatIssue(
+                    severity='info',
+                    line_number=block_ln,
+                    line_text=block_text,
+                    message=(
+                        f"Разделитель ':::' в ответе блока "
+                        f"с '{separator}' (строка {line_num}). "
+                        f"Сейчас обрабатывается корректно, но может "
+                        f"запутать при редактировании."
+                    ),
+                    suggestion=(
+                        f"Если ::: — часть текста, "
+                        f"оберните в `inline code` для ясности."
+                    ),
+                ))
 
 
-def _check_inline_format_conflicts(
+def _check_single_line_internal_conflicts(
         lines: List[str],
         report: FileValidationReport,
 ) -> None:
-    """Проверяет конфликт cloze-разметки внутри :: и ::: карточек.
-
-    Ситуация: строка содержит :: или ::: (single-line карточка),
-    но в вопросе или ответе есть ==cloze==. Парсер обработает это
-    как basic/bidirectional карточку, cloze может быть потерян
-    или обработан неожиданно.
+    """Проверяет конфликты внутри однострочных :: и ::: карточек:
+    - cloze в вопросе или ответе
     """
-    in_code_block = False
-    in_frontmatter = False
-
-    for line_idx, line in enumerate(lines):
-        line_num = line_idx + 1
-        stripped = line.strip()
-
-        # Пропуск frontmatter
-        if line_idx == 0 and stripped == '---':
-            in_frontmatter = True
-            continue
-        if in_frontmatter:
-            if stripped == '---':
-                in_frontmatter = False
-            continue
-
-        # Пропуск блоков кода
-        if stripped.startswith('```'):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block:
-            continue
-
-        # Пропуск заголовков и служебных строк
+    for line_idx, line_num, stripped in _iter_content_lines(lines):
         if not stripped or stripped.startswith('#') or stripped == '---':
             continue
 
-        # Убираем inline-код для анализа
-        text_no_code = re.sub(r'`[^`]*`', '', stripped)
+        text_no_code = _strip_inline_code(stripped)
 
-        # --- Проверка ::: (bidirectional) ---
+        # --- ::: с cloze ---
         if ':::' in text_no_code:
             parts = text_no_code.split(':::', 1)
             if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                # Проверяем обе стороны на cloze
                 for side_idx, side in enumerate(parts):
                     if re.search(r'==(?=\S).+?(?<=\S)==', side):
                         side_name = "первой" if side_idx == 0 else "второй"
@@ -800,27 +911,25 @@ def _check_inline_format_conflicts(
                             message=(
                                 f"Cloze-разметка (==...==) в {side_name} "
                                 f"части Bidirectional-карточки (:::). "
-                                f"Парсер создаст двустороннюю карточку, "
-                                f"cloze-пропуски не будут обработаны как Cloze-тип."
+                                f"Cloze-пропуски не будут обработаны "
+                                f"как отдельный Cloze-тип."
                             ),
                             suggestion=(
-                                "Если нужна cloze-карточка — уберите ::: "
-                                "и оставьте текст с ==...== на отдельной строке. "
-                                "Если нужна bidirectional — уберите == из текста."
+                                "Если нужна Cloze — уберите ::: "
+                                "и оставьте текст с ==...== отдельным блоком. "
+                                "Если нужна Bidirectional — уберите ==."
                             ),
                         ))
-                        break  # одного предупреждения на строку достаточно
+                        break
                 continue
 
-        # --- Проверка :: (basic) ---
+        # --- :: с cloze ---
         if '::' in text_no_code and ':::' not in text_no_code:
             parts = text_no_code.split('::', 1)
             if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                question_part = parts[0]
-                answer_part = parts[1]
+                q_part, a_part = parts
 
-                # Cloze в ответе — наиболее частый случай
-                if re.search(r'==(?=\S).+?(?<=\S)==', answer_part):
+                if re.search(r'==(?=\S).+?(?<=\S)==', a_part):
                     report.issues.append(FormatIssue(
                         severity='warning',
                         line_number=line_num,
@@ -828,20 +937,16 @@ def _check_inline_format_conflicts(
                         message=(
                             "Cloze-разметка (==...==) в ответе "
                             "Basic-карточки (::). "
-                            "Парсер может обработать это как Basic, "
-                            "а cloze-пропуски будут потеряны."
+                            "Парсер может обработать как Basic, "
+                            "cloze-пропуски будут потеряны."
                         ),
                         suggestion=(
-                            "Если нужна cloze-карточка — уберите :: "
-                            "и оставьте текст с ==...== как отдельный блок. "
-                            "Если нужна Q&A карточка — уберите == из ответа. "
-                            "Допустимо: парсер конвертирует cloze в ответе, "
-                            "но вопрос будет проигнорирован."
+                            "Если нужна Cloze — уберите :: "
+                            "и оставьте текст с ==...== отдельным блоком. "
+                            "Если нужна Q&A — уберите == из ответа."
                         ),
                     ))
-
-                # Cloze в вопросе — редкий, но проблемный случай
-                elif re.search(r'==(?=\S).+?(?<=\S)==', question_part):
+                elif re.search(r'==(?=\S).+?(?<=\S)==', q_part):
                     report.issues.append(FormatIssue(
                         severity='warning',
                         line_number=line_num,
@@ -849,14 +954,242 @@ def _check_inline_format_conflicts(
                         message=(
                             "Cloze-разметка (==...==) в вопросе "
                             "Basic-карточки (::). "
-                            "Неоднозначность: это Q&A или Cloze?"
+                            "Неоднозначность формата."
                         ),
                         suggestion=(
-                            "Если нужна cloze — уберите :: и оставьте "
-                            "текст с ==...== как отдельный блок. "
+                            "Если нужна Cloze — уберите :: "
+                            "и оставьте текст с ==...== отдельным блоком. "
                             "Если нужна Q&A — уберите == из вопроса."
                         ),
                     ))
+
+
+def _check_legacy_block_conflicts(
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет конфликты в legacy-блоках (### Вопрос: ... Ответ: ...):
+    - :: или ::: в строке заголовка вопроса
+    - cloze в теле ответа (info — парсер это поддерживает)
+    - ? или ?? внутри legacy-блока
+    """
+    for line_idx, line_num, stripped in _iter_content_lines(lines):
+        if not re.match(r'^###\s*Вопрос:', stripped):
+            continue
+
+        # Проверяем :: / ::: в самой строке ### Вопрос:
+        question_text = re.sub(r'^###\s*Вопрос:\s*', '', stripped)
+        question_no_code = _strip_inline_code(question_text)
+
+        if _has_bidi_sep(question_no_code):
+            report.issues.append(FormatIssue(
+                severity='warning',
+                line_number=line_num,
+                line_text=stripped,
+                message=(
+                    "Bidirectional-разделитель (:::) в строке "
+                    "legacy-формата (### Вопрос:). "
+                    "Неоднозначность: legacy или :::?"
+                ),
+                suggestion=(
+                    "Используйте один формат: "
+                    "либо ### Вопрос:/Ответ:, либо :::. "
+                    "Если ::: — часть текста, оберните в `inline code`."
+                ),
+            ))
+
+        elif _has_basic_sep(question_no_code):
+            report.issues.append(FormatIssue(
+                severity='warning',
+                line_number=line_num,
+                line_text=stripped,
+                message=(
+                    "Basic-разделитель (::) в строке "
+                    "legacy-формата (### Вопрос:). "
+                    "Неоднозначность: legacy или ::?"
+                ),
+                suggestion=(
+                    "Используйте один формат: "
+                    "либо ### Вопрос:/Ответ:, либо ::. "
+                    "Если :: — часть текста, оберните в `inline code`."
+                ),
+            ))
+
+        # Собираем тело legacy-блока (до следующего ### Вопрос: или конца)
+        body_lines = []
+        check_idx = line_idx + 1
+
+        # Пропуск через итератор не работает, идём по raw lines
+        in_code = False
+        while check_idx < len(lines):
+            body_stripped = lines[check_idx].strip()
+
+            if body_stripped.startswith('```'):
+                in_code = not in_code
+                check_idx += 1
+                continue
+            if in_code:
+                check_idx += 1
+                continue
+
+            if re.match(r'^###\s*Вопрос:', body_stripped):
+                break
+            if body_stripped.startswith('# ') or body_stripped.startswith('## '):
+                break
+
+            if body_stripped:
+                body_lines.append((check_idx + 1, body_stripped))
+            check_idx += 1
+
+        # Проверяем тело на конфликты
+        for body_ln, body_text in body_lines:
+            # ? или ?? как отдельная строка внутри legacy
+            if body_text in ('?', '??'):
+                report.issues.append(FormatIssue(
+                    severity='warning',
+                    line_number=body_ln,
+                    line_text=body_text,
+                    message=(
+                        f"Разделитель '{body_text}' внутри "
+                        f"legacy-блока (### Вопрос: на строке {line_num}). "
+                        f"Конфликт форматов."
+                    ),
+                    suggestion=(
+                        "Используйте один формат: "
+                        f"либо ### Вопрос:/Ответ:, либо '{body_text}'. "
+                        f"Если '{body_text}' — часть текста, "
+                        f"добавьте текст на ту же строку."
+                    ),
+                ))
+
+            # cloze в ответе legacy — поддерживается парсером, но информируем
+            if body_text.startswith('Ответ:') or body_text.startswith('ответ:'):
+                answer_text = re.sub(r'^[Оо]твет:\s*', '', body_text)
+                if _has_cloze(answer_text):
+                    report.issues.append(FormatIssue(
+                        severity='info',
+                        line_number=body_ln,
+                        line_text=body_text,
+                        message=(
+                            "Cloze-разметка (==...==) в ответе "
+                            "legacy-блока. Парсер обработает как "
+                            "Cloze-карточку (вопрос будет проигнорирован)."
+                        ),
+                        suggestion=(
+                            "Если нужна Q&A — уберите ==. "
+                            "Если нужна Cloze — можно вынести текст "
+                            "в отдельный блок без ### Вопрос:."
+                        ),
+                    ))
+
+
+def _check_adjacent_separators(
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет несколько разделителей ? / ?? подряд без чёткого разграничения.
+
+    Ситуация:
+        Q1
+        ?
+        A1
+        Q2       <-- нет пустой строки / --- между блоками
+        ?
+        A2
+    Парсер может слить A1+Q2 в один ответ.
+    """
+    separator_positions = []
+
+    for line_idx, line_num, stripped in _iter_content_lines(lines):
+        if stripped in ('?', '??'):
+            separator_positions.append((line_idx, line_num, stripped))
+
+    for i in range(1, len(separator_positions)):
+        prev_idx, prev_num, prev_sep = separator_positions[i - 1]
+        curr_idx, curr_num, curr_sep = separator_positions[i]
+
+        # Проверяем: есть ли пустая строка или --- между ними
+        has_boundary = False
+        for between_idx in range(prev_idx + 1, curr_idx):
+            between_line = lines[between_idx].strip()
+            if not between_line:
+                has_boundary = True
+                break
+            if between_line == '---':
+                has_boundary = True
+                break
+            if between_line.startswith('#'):
+                has_boundary = True
+                break
+
+        if not has_boundary:
+            report.issues.append(FormatIssue(
+                severity='warning',
+                line_number=curr_num,
+                line_text=curr_sep,
+                message=(
+                    f"Разделитель '{curr_sep}' следует за "
+                    f"'{prev_sep}' (строка {prev_num}) "
+                    f"без пустой строки или --- между блоками. "
+                    f"Парсер может неправильно определить границы "
+                    f"вопроса и ответа."
+                ),
+                suggestion=(
+                    "Добавьте пустую строку или --- между "
+                    "блоками карточек для чёткого разграничения."
+                ),
+            ))
+
+        # Смешение ? и ?? рядом
+        if prev_sep != curr_sep:
+            report.issues.append(FormatIssue(
+                severity='info',
+                line_number=curr_num,
+                line_text=curr_sep,
+                message=(
+                    f"Смежные разделители разных типов: "
+                    f"'{prev_sep}' (строка {prev_num}) и "
+                    f"'{curr_sep}' (строка {curr_num}). "
+                    f"Карточки попадут в разные note types при "
+                    f"экспорте в Anki."
+                ),
+                suggestion=(
+                    "Рассмотрите использование одного типа "
+                    "разделителя в файле."
+                ),
+            ))
+
+
+def _check_double_separator_on_line(
+        lines: List[str],
+        report: FileValidationReport,
+) -> None:
+    """Проверяет наличие и :: и ::: на одной строке, или другие неоднозначности."""
+    for line_idx, line_num, stripped in _iter_content_lines(lines):
+        if not stripped or stripped.startswith('#') or stripped == '---':
+            continue
+
+        text_no_code = _strip_inline_code(stripped)
+
+        # Строка содержит и :: и ::: одновременно
+        # (например a::b:::c или a:::b::c)
+        if ':::' in text_no_code and '::' in text_no_code.replace(':::', ''):
+            # Есть :: отдельно от :::
+            report.issues.append(FormatIssue(
+                severity='warning',
+                line_number=line_num,
+                line_text=stripped,
+                message=(
+                    "Строка содержит и '::' и ':::' одновременно. "
+                    "Неоднозначный парсинг: парсер выберет только "
+                    "один формат."
+                ),
+                suggestion=(
+                    "Разделите на отдельные карточки или "
+                    "оберните :: / ::: в `inline code` "
+                    "если это часть текста."
+                ),
+            ))
 
 
 def _check_unclosed_cloze(
