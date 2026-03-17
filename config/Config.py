@@ -240,6 +240,135 @@ class AppConfig:
             'multi_line_bidirectional': self.multi_line_bidirectional_sep,
         }
 
+    def add_category(self, category: str) -> bool:
+        """Добавляет новую категорию в список и сохраняет в config.ini."""
+        category = category.strip().lower().replace(' ', '_')
+        category = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', category)
+
+        if not category:
+            return False
+
+        if category in self.categories:
+            return False
+
+        self.categories.append(category)
+        self._save_categories()
+        return True
+
+    def remove_category(self, category: str) -> bool:
+        """Удаляет категорию из списка и сохраняет в config.ini."""
+        if category not in self.categories:
+            return False
+
+        self.categories.remove(category)
+        self._save_categories()
+        return True
+
+    def rename_category(self, old_name: str, new_name: str) -> bool:
+        """Переименовывает категорию."""
+        new_name = new_name.strip().lower().replace(' ', '_')
+        new_name = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', new_name)
+
+        if not new_name:
+            return False
+        if old_name not in self.categories:
+            return False
+        if new_name in self.categories:
+            return False
+
+        idx = self.categories.index(old_name)
+        self.categories[idx] = new_name
+        self._save_categories()
+        return True
+
+    def _save_categories(self) -> None:
+        """Сохраняет текущий список категорий в config.ini,
+        не затрагивая остальное содержимое файла."""
+        categories_str = ', '.join(self.categories)
+
+        try:
+            # Читаем файл как текст
+            if os.path.exists(self._config_path):
+                with open(self._config_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            else:
+                lines = []
+
+            # Ищем строку categories в секции [main]
+            in_main_section = False
+            found = False
+
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+
+                # Отслеживаем секции
+                if stripped.startswith('['):
+                    in_main_section = stripped.lower() == '[main]'
+                    continue
+
+                # Ищем ключ categories в секции [main]
+                if in_main_section and stripped.startswith('categories'):
+                    # Проверяем что это именно ключ, а не комментарий
+                    if '=' in stripped:
+                        key_part = stripped.split('=', 1)[0].strip()
+                        if key_part == 'categories':
+                            lines[i] = f'categories = {categories_str}\n'
+                            found = True
+                            break
+
+            # Если строка не найдена — добавляем
+            if not found:
+                # Ищем секцию [main]
+                main_section_idx = None
+                for i, line in enumerate(lines):
+                    if line.strip().lower() == '[main]':
+                        main_section_idx = i
+                        break
+
+                if main_section_idx is not None:
+                    # Вставляем после заголовка секции
+                    insert_idx = main_section_idx + 1
+                    lines.insert(insert_idx, f'categories = {categories_str}\n')
+                else:
+                    # Секции [main] нет — добавляем в конец
+                    if lines and not lines[-1].endswith('\n'):
+                        lines.append('\n')
+                    lines.append('\n[main]\n')
+                    lines.append(f'categories = {categories_str}\n')
+
+            # Записываем обратно
+            with open(self._config_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+        except Exception as e:
+            print(f"❌ Ошибка сохранения config.ini: {e}")
+
+    def validate_category_name(self, name: str) -> tuple:
+        """Валидирует имя категории.
+
+        Returns:
+            (is_valid: bool, normalized_name: str, error_message: str)
+        """
+        if not name or not name.strip():
+            return False, '', 'Имя категории не может быть пустым'
+
+        normalized = name.strip().lower().replace(' ', '_')
+        normalized = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', normalized)
+
+        if not normalized:
+            return False, '', 'Имя содержит только недопустимые символы'
+
+        if len(normalized) < 2:
+            return False, normalized, 'Минимум 2 символа'
+
+        if len(normalized) > 50:
+            return False, normalized, 'Максимум 50 символов'
+
+        if normalized in self.categories:
+            return False, normalized, f'Категория "{normalized}" уже существует'
+
+        return True, normalized, ''
+
 
 # Глобальный экземпляр конфигурации (singleton pattern)
 _config_instance: Optional[AppConfig] = None
