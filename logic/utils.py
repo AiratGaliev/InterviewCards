@@ -3106,7 +3106,7 @@ def generate_anki_import_file(
         cards: List[InterviewCard],
         topic_name: str,
         output_path: str,
-        deck_prefix: str = "Interview",
+        deck_prefix: str = "Interview Cards",
         use_reverse_cards: bool = True,
 ) -> List[str]:
     output_dir = (
@@ -3121,14 +3121,8 @@ def generate_anki_import_file(
     if not cards:
         return created_files
 
-    if cards[0].deck_name:
-        deck_name = cards[0].deck_name.replace('/', '::')
-    else:
-        category = cards[0].category
-        deck_name = f"{deck_prefix}::{category.replace('_', ' ').title()}"
-
-    if deck_name.startswith('flashcards'):
-        deck_name = deck_name.replace('flashcards', 'Interview Cards', 1)
+    category = cards[0].category or 'general'
+    deck_name = f"{deck_prefix}::{category}"
 
     basic_cards: List[InterviewCard] = [
         c for c in cards
