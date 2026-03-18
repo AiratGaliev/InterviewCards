@@ -1,6 +1,6 @@
 [main]
 # Категории карточек (через запятую)
-categories = typescript, javascript, java, react, next, python, sql, system_design, algorithms, data_structures, general, java_epam
+categories = typescript, javascript, java, react, next, python, sql, system_design, algorithms, data_structures, general
 
 # ID категории по умолчанию
 category_id = 0

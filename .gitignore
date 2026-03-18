@@ -17,7 +17,8 @@ ENV/
 
 # Config
 .env
-config_local.ini
+*.ini
+/.interview_cards_settings.json
 
 # Output
 output/
@@ -30,4 +31,3 @@ Thumbs.db
 
 # Logs
 *.log
-/.interview_cards_settings.json
