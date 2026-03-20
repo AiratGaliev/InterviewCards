@@ -169,6 +169,19 @@ class FileValidationReport:
         return "\n".join(lines)
 
 
+@dataclass
+class DuplicateInfo:
+    """Информация о найденном дубликате карточки."""
+    question_preview: str  # Начало текста вопроса (до 120 символов)
+    answer_preview: str = ""  # Начало ответа (для контекста, до 80 символов)
+    original_source: str = ""  # Путь к файлу первого вхождения
+    original_topic: str = ""  # Имя темы первого вхождения
+    duplicate_source: str = ""  # Путь к файлу дубликата
+    duplicate_topic: str = ""  # Имя темы дубликата
+    card_type: str = ""  # Тип карточки (значение CardType)
+    is_cross_file: bool = False  # True — дубликат в другом файле
+
+
 def detect_line_format(line: str) -> Optional[str]:
     """Определяет формат карточки в одной строке.
     Возвращает строковое описание формата или None."""
@@ -543,70 +556,78 @@ def _check_format_mixing(
         all_formats: Dict[str, List[int]],
         report: FileValidationReport,
 ) -> None:
-    """Проверяет смешение несовместимых форматов в файле."""
+    """Проверяет смешение несовместимых форматов в файле.
+
+    Считает по ГРУППАМ форматов (basic, bidirectional),
+    а не по индивидуальным синтаксическим вариантам.
+    """
 
     found_formats = set(all_formats.keys())
 
     # Убираем cloze из анализа — он всегда совместим
     qa_formats = found_formats - _CLOZE_FORMATS
 
-    if len(qa_formats) <= 1:
-        # 0 или 1 QA-формат — нет смешения
+    if not qa_formats:
         return
 
-    # Проверяем несовместимые пары
+    # ── Группируем по смысловым типам ──
+    basic_found = qa_formats & _BASIC_FORMATS
+    bidi_found = qa_formats & _BIDI_FORMATS
+
+    # Считаем количество ГРУПП, а не вариантов синтаксиса
+    active_groups = [g for g in [basic_found, bidi_found] if g]
+
+    if len(active_groups) <= 1:
+        # Все QA-форматы одного типа
+        # (например :: и ? — оба basic, это нормально)
+        return
+
+    # ── Проверяем несовместимые пары ──
     for group_a, group_b, severity, message, suggestion in _INCOMPATIBLE_PAIRS:
         formats_in_a = qa_formats & group_a
         formats_in_b = qa_formats & group_b
 
-        if formats_in_a and formats_in_b:
+        if not (formats_in_a and formats_in_b):
+            continue
+
+        # Считаем карточки в каждой группе
+        count_a = sum(len(all_formats.get(f, [])) for f in formats_in_a)
+        count_b = sum(len(all_formats.get(f, [])) for f in formats_in_b)
+        min_count = min(count_a, count_b)
+
+        # Единичные случаи — info, не warning
+        effective_severity = 'info' if min_count <= 3 else severity
+
+        # has_mixed_formats только для warning/error
+        if effective_severity in ('warning', 'error'):
             report.has_mixed_formats = True
 
-            # Собираем строки для отчёта
-            detail_lines = []
-            for fmt in sorted(formats_in_a | formats_in_b):
-                fmt_line_nums = all_formats.get(fmt, [])
-                if fmt_line_nums:
-                    nums_str = ", ".join(str(n) for n in fmt_line_nums[:5])
-                    extra = (
-                        f" ...+{len(fmt_line_nums) - 5}"
-                        if len(fmt_line_nums) > 5 else ""
-                    )
-                    detail_lines.append(
-                        f"  '{fmt}' → строки: {nums_str}{extra}"
-                    )
+        # ── Детали для отчёта ──
+        detail_lines = []
+        for fmt in sorted(formats_in_a | formats_in_b):
+            fmt_line_nums = all_formats.get(fmt, [])
+            if fmt_line_nums:
+                nums_str = ", ".join(str(n) for n in fmt_line_nums[:5])
+                extra = (
+                    f" ...+{len(fmt_line_nums) - 5}"
+                    if len(fmt_line_nums) > 5 else ""
+                )
+                detail_lines.append(
+                    f"  '{fmt}' → строки: {nums_str}{extra}"
+                )
 
-            # Находим первую проблемную строку
-            all_line_nums = []
-            for fmt in formats_in_a | formats_in_b:
-                all_line_nums.extend(all_formats.get(fmt, []))
+        all_line_nums = []
+        for fmt in formats_in_a | formats_in_b:
+            all_line_nums.extend(all_formats.get(fmt, []))
 
-            first_line = min(all_line_nums) if all_line_nums else 1
+        first_line = min(all_line_nums) if all_line_nums else 1
 
-            report.issues.append(FormatIssue(
-                severity=severity,
-                line_number=first_line,
-                line_text='',
-                message=message,
-                suggestion=suggestion + "\n" + "\n".join(detail_lines),
-            ))
-
-    # Предупреждение о большом количестве разных форматов
-    # (больше 3 — скорее всего бардак)
-    if len(qa_formats) >= 3:
-        report.has_mixed_formats = True
         report.issues.append(FormatIssue(
-            severity='warning',
-            line_number=1,
+            severity=effective_severity,
+            line_number=first_line,
             line_text='',
-            message=(
-                f"Используется {len(qa_formats)} различных "
-                f"QA-форматов: {', '.join(sorted(qa_formats))}"
-            ),
-            suggestion=(
-                "Рекомендуется 1-2 формата на файл "
-                "для предсказуемого парсинга"
-            ),
+            message=message,
+            suggestion=suggestion + "\n" + "\n".join(detail_lines),
         ))
 
 
@@ -1449,25 +1470,46 @@ def _check_duplicate_questions(
     except Exception:
         return
 
-    seen: Dict[str, int] = {}
+    # key -> (card_id, question_text, card_type, answer_preview)
+    seen: Dict[str, Tuple[int, str, str, str]] = {}
+
     for card in cards:
-        key = normalize_text_key(card.question)
-        if not key:
+        if card.is_reverse:
             continue
+
+        key = normalize_text_key(card.question)
+        if not key or len(key) < 5:
+            continue
+
         if key in seen:
+            orig_id, orig_q, orig_type, orig_a = seen[key]
+            q_preview = card.question[:60]
+            ellipsis = "…" if len(card.question) > 60 else ""
+
             report.issues.append(FormatIssue(
                 severity='warning',
                 line_number=0,
                 line_text=card.question[:100],
                 message=(
                     f"Дубликат вопроса: "
-                    f"'{card.question[:60]}…' "
-                    f"(карточка #{seen[key]})"
+                    f"'{q_preview}{ellipsis}' "
+                    f"(совпадает с карточкой #{orig_id}, "
+                    f"тип: {orig_type})"
                 ),
-                suggestion="Удалите дублирующуюся карточку",
+                suggestion=(
+                    f"Оригинал: '{orig_q[:60]}…'\n"
+                    f"Ответ оригинала: '{orig_a[:50]}…'\n"
+                    f"Удалите одну из дублирующихся карточек "
+                    f"из исходного файла."
+                ),
             ))
         else:
-            seen[key] = card.id
+            seen[key] = (
+                card.id,
+                card.question,
+                card.card_type.value,
+                card.answer,
+            )
 
 
 def validate_all_files(input_dir: str) -> List[FileValidationReport]:
@@ -3187,12 +3229,128 @@ def generate_anki_import_file(
     return created_files
 
 
-def clean_up_duplicates(file_paths: List[str]) -> int:
+def find_all_duplicates(input_dir: str) -> List[DuplicateInfo]:
+    """Находит дубликаты карточек между всеми файлами в директории.
+    Возвращает список DuplicateInfo для каждого дубликата.
+    Первое вхождение считается оригиналом, остальные — дубликатами.
+    Reverse-карточки (is_reverse=True) пропускаются.
+    """
+    topics = load_markdown_topics(input_dir)
+
+    # normalized_question -> list of (card, topic_name, file_path)
+    question_map: Dict[str, List[Tuple]] = {}
+
+    for topic_name, topic_data in sorted(topics.items()):
+        cards = parse_cards_from_markdown(topic_data['path'])
+        for card in cards:
+            if card.is_reverse:
+                continue
+            key = normalize_text_key(card.question)
+            if not key or len(key) < 5:
+                continue
+            if key not in question_map:
+                question_map[key] = []
+            question_map[key].append(
+                (card, topic_name, topic_data['path'])
+            )
+
+    duplicates: List[DuplicateInfo] = []
+
+    for key, occurrences in question_map.items():
+        if len(occurrences) <= 1:
+            continue
+
+        orig_card, orig_topic, orig_path = occurrences[0]
+
+        for card, topic_name, file_path in occurrences[1:]:
+            is_cross = (orig_path != file_path)
+            duplicates.append(DuplicateInfo(
+                question_preview=card.question[:120],
+                answer_preview=card.answer[:80],
+                original_source=orig_path,
+                original_topic=orig_topic,
+                duplicate_source=file_path,
+                duplicate_topic=topic_name,
+                card_type=card.card_type.value,
+                is_cross_file=is_cross,
+            ))
+
+    # Сортировка: сначала между файлами, потом внутри файлов
+    duplicates.sort(key=lambda d: (not d.is_cross_file, d.original_topic))
+    return duplicates
+
+
+def generate_duplicate_report_text(
+        duplicates: List[DuplicateInfo],
+) -> str:
+    """Генерирует текстовый отчёт о найденных дубликатах."""
+    if not duplicates:
+        return "✅ Дубликатов не найдено."
+
+    cross_file = [d for d in duplicates if d.is_cross_file]
+    same_file = [d for d in duplicates if not d.is_cross_file]
+
+    lines = [
+        "=" * 60,
+        "ОТЧЁТ О ДУБЛИКАТАХ КАРТОЧЕК",
+        "=" * 60,
+        "",
+        f"Всего дубликатов: {len(duplicates)}",
+        f"  Между файлами: {len(cross_file)}",
+        f"  Внутри файлов: {len(same_file)}",
+        "",
+    ]
+
+    if cross_file:
+        lines.append("-" * 40)
+        lines.append("ДУБЛИКАТЫ МЕЖДУ ФАЙЛАМИ")
+        lines.append("-" * 40)
+        for i, dup in enumerate(cross_file, 1):
+            lines.append(f"\n  #{i}")
+            lines.append(f"  Вопрос: {dup.question_preview}")
+            if dup.answer_preview:
+                lines.append(f"  Ответ:  {dup.answer_preview}…")
+            lines.append(
+                f"  Оригинал:  {dup.original_topic} "
+                f"({Path(dup.original_source).name})"
+            )
+            lines.append(
+                f"  Дубликат:  {dup.duplicate_topic} "
+                f"({Path(dup.duplicate_source).name})"
+            )
+            if dup.card_type:
+                lines.append(f"  Тип: {dup.card_type}")
+
+    if same_file:
+        lines.append("")
+        lines.append("-" * 40)
+        lines.append("ДУБЛИКАТЫ ВНУТРИ ФАЙЛОВ")
+        lines.append("-" * 40)
+        for i, dup in enumerate(same_file, 1):
+            lines.append(f"\n  #{i}")
+            lines.append(f"  Вопрос: {dup.question_preview}")
+            lines.append(f"  Файл:   {dup.duplicate_topic}")
+            if dup.card_type:
+                lines.append(f"  Тип: {dup.card_type}")
+
+    return "\n".join(lines)
+
+
+def clean_up_duplicates(
+        file_paths: List[str],
+) -> Tuple[int, List[DuplicateInfo]]:
+    """Удаляет дубликаты из сгенерированных файлов.
+
+    Returns:
+        (total_removed, removed_details) — количество удалённых
+        и список DuplicateInfo для каждого удалённого дубликата.
+    """
     if not file_paths:
-        return 0
+        return 0, []
 
     seen_questions: Set[str] = set()
     total_removed = 0
+    removed_details: List[DuplicateInfo] = []
 
     for file_path in file_paths:
         if not os.path.exists(file_path):
@@ -3215,10 +3373,32 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
             unique_data: List[str] = []
             for line in data_lines:
                 parts = line.split('\t')
-                question_key = normalize_text_key(parts[0]) if parts else ""
+                question_key = (
+                    normalize_text_key(parts[0]) if parts else ""
+                )
+
                 if question_key and question_key not in seen_questions:
                     seen_questions.add(question_key)
                     unique_data.append(line)
+                elif question_key and question_key in seen_questions:
+                    # ── Дубликат — записываем детали ──
+                    q_raw = parts[0] if parts else ""
+                    a_raw = parts[1] if len(parts) > 1 else ""
+                    # Убираем HTML для читаемости
+                    q_clean = re.sub(
+                        r'<[^>]+>', '', q_raw
+                    ).strip()[:120]
+                    a_clean = re.sub(
+                        r'<[^>]+>', '', a_raw
+                    ).strip()[:80]
+
+                    removed_details.append(DuplicateInfo(
+                        question_preview=q_clean,
+                        answer_preview=a_clean,
+                        duplicate_source=os.path.basename(file_path),
+                        duplicate_topic=os.path.basename(file_path),
+                        is_cross_file=True,
+                    ))
                 elif not question_key:
                     unique_data.append(line)
 
@@ -3230,7 +3410,8 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
                     f.writelines(header_lines)
                     f.writelines(unique_data)
                 logger.info(
-                    f"Удалено {removed} дубл. из {os.path.basename(file_path)}"
+                    f"Удалено {removed} дубл. "
+                    f"из {os.path.basename(file_path)}"
                 )
 
         except Exception as e:
@@ -3238,7 +3419,7 @@ def clean_up_duplicates(file_paths: List[str]) -> int:
             continue
 
     logger.info(f"Всего удалено дубликатов: {total_removed}")
-    return total_removed
+    return total_removed, removed_details
 
 
 def natural_sort(file_paths: List[str]) -> List[str]:

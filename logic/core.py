@@ -14,7 +14,7 @@ from logic.utils import (
     load_markdown_topics,
     parse_cards_from_markdown,
     generate_all_formats,
-    clean_up_duplicates
+    clean_up_duplicates, normalize_text_key, DuplicateInfo
 )
 from models.InterviewCard import InterviewCard
 
@@ -32,6 +32,8 @@ class GenerationResult:
     topics_processed: int = 0
     cards_by_type: Dict[str, int] = field(default_factory=dict)
     cards_by_category: Dict[str, int] = field(default_factory=dict)
+    duplicates_found: List = field(default_factory=list)
+    duplicates_removed: List = field(default_factory=list)
 
 
 class CardGenerator:
@@ -347,16 +349,70 @@ class CardGenerator:
         if progress_callback:
             progress_callback(total_topics, total_topics, "Завершено")
 
-        # Удаление дубликатов
+        # ── Детекция дубликатов на уровне исходных материалов ──
+        seen_questions: Dict[str, tuple] = {}
+        for card in all_cards:
+            if card.is_reverse:
+                continue
+            key = normalize_text_key(card.question)
+            if not key or len(key) < 5:
+                continue
+
+            if key in seen_questions:
+                orig_topic, orig_q, orig_a = seen_questions[key]
+                if card.topic != orig_topic:
+                    result.duplicates_found.append(DuplicateInfo(
+                        question_preview=card.question[:120],
+                        answer_preview=card.answer[:80],
+                        original_source="",
+                        original_topic=orig_topic,
+                        duplicate_source="",
+                        duplicate_topic=card.topic,
+                        card_type=card.card_type.value,
+                        is_cross_file=True,
+                    ))
+                else:
+                    result.duplicates_found.append(DuplicateInfo(
+                        question_preview=card.question[:120],
+                        answer_preview=card.answer[:80],
+                        original_source="",
+                        original_topic=orig_topic,
+                        duplicate_source="",
+                        duplicate_topic=card.topic,
+                        card_type=card.card_type.value,
+                        is_cross_file=False,
+                    ))
+            else:
+                seen_questions[key] = (
+                    card.topic, card.question, card.answer
+                )
+
+        if result.duplicates_found:
+            cross = sum(
+                1 for d in result.duplicates_found if d.is_cross_file
+            )
+            same = len(result.duplicates_found) - cross
+            parts = []
+            if cross:
+                parts.append(f"{cross} между файлами")
+            if same:
+                parts.append(f"{same} внутри файлов")
+            result.warnings.append(
+                f"Найдено дубликатов: {', '.join(parts)}"
+            )
+
+            # ── Дедупликация выходных файлов ──
         if clean_duplicates and result.output_files:
             txt_files = [
                 f for f in result.output_files if f.endswith('.txt')
             ]
             if txt_files:
-                removed = clean_up_duplicates(txt_files)
+                removed, dup_details = clean_up_duplicates(txt_files)
+                result.duplicates_removed.extend(dup_details)
                 if removed > 0:
                     result.warnings.append(
-                        f"Удалено дубликатов: {removed}"
+                        f"Удалено дубликатов из выходных файлов: "
+                        f"{removed}"
                     )
 
         result.total_cards = len(all_cards)

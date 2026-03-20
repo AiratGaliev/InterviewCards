@@ -3,10 +3,12 @@ import os
 import re
 import traceback
 import zipfile
+from pathlib import Path
 
 import streamlit as st
 
 from config.Config import get_config
+from logic import find_all_duplicates, generate_duplicate_report_text
 from logic.core import CardGenerator, GenerationResult
 from logic.utils import (
     load_markdown_topics,
@@ -759,6 +761,114 @@ def render_tab_validation():
             else:
                 st.success("✅ Проблем не обнаружено")
 
+    # ── Кросс-файловые дубликаты ──
+    st.divider()
+    st.markdown("### 🔍 Дубликаты между файлами")
+    st.caption(
+        "Поиск одинаковых вопросов в разных файлах. "
+        "Помогает найти и удалить лишние карточки из исходных материалов."
+    )
+
+    if st.button(
+            "🔍 Найти дубликаты",
+            use_container_width=True,
+            key="find_duplicates_btn",
+    ):
+        with st.spinner("Поиск дубликатов..."):
+            duplicates = find_all_duplicates(input_dir)
+            st.session_state['found_duplicates'] = duplicates
+
+    duplicates = st.session_state.get('found_duplicates', None)
+
+    if duplicates is None:
+        st.info(
+            "Нажмите кнопку выше для поиска дубликатов "
+            "между файлами"
+        )
+    elif not duplicates:
+        st.success("✅ Дубликатов не найдено!")
+    else:
+        cross_file = [d for d in duplicates if d.is_cross_file]
+        same_file = [d for d in duplicates if not d.is_cross_file]
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("🔄 Всего", len(duplicates))
+        col2.metric("📁 Между файлами", len(cross_file))
+        col3.metric("📄 Внутри файлов", len(same_file))
+
+        # Кнопка скачивания отчёта
+        dup_report = generate_duplicate_report_text(duplicates)
+        st.download_button(
+            "📥 Скачать отчёт о дубликатах",
+            data=dup_report,
+            file_name="duplicates_report.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+        if cross_file:
+            st.markdown("#### 📁 Дубликаты между файлами")
+            st.caption(
+                "Один и тот же вопрос найден в разных файлах. "
+                "Удалите лишнюю карточку из одного из файлов."
+            )
+
+            for i, dup in enumerate(cross_file):
+                q_short = dup.question_preview[:80]
+                ellipsis = "…" if len(dup.question_preview) > 80 else ""
+
+                with st.expander(
+                        f"🔄 {q_short}{ellipsis}",
+                        expanded=(i < 3),
+                ):
+                    col_orig, col_dup = st.columns(2)
+
+                    with col_orig:
+                        st.markdown("**📗 Оригинал:**")
+                        st.markdown(f"**Тема:** `{dup.original_topic}`")
+                        orig_name = Path(dup.original_source).name
+                        st.caption(f"Файл: `{orig_name}`")
+
+                    with col_dup:
+                        st.markdown("**📕 Дубликат:**")
+                        st.markdown(f"**Тема:** `{dup.duplicate_topic}`")
+                        dup_name = Path(dup.duplicate_source).name
+                        st.caption(f"Файл: `{dup_name}`")
+
+                    st.markdown("**Вопрос:**")
+                    st.markdown(f"> {dup.question_preview}")
+
+                    if dup.answer_preview:
+                        st.markdown("**Ответ (начало):**")
+                        st.caption(f"{dup.answer_preview}…")
+
+                    if dup.card_type:
+                        type_labels = {
+                            'single_line_basic': 'Basic (::)',
+                            'single_line_bidirectional': 'Bidirectional (:::)',
+                            'multi_line_basic': 'Multi-line (?)',
+                            'multi_line_bidirectional': 'Multi-line (??)',
+                            'cloze': 'Cloze (==…==)',
+                        }
+                        label = type_labels.get(
+                            dup.card_type, dup.card_type
+                        )
+                        st.caption(f"Тип: {label}")
+
+        if same_file:
+            st.markdown("#### 📄 Дубликаты внутри файлов")
+            st.caption(
+                "Одинаковые вопросы внутри одного файла."
+            )
+
+            for dup in same_file:
+                q_short = dup.question_preview[:60]
+                ellipsis = "…" if len(dup.question_preview) > 60 else ""
+                st.warning(
+                    f"🔄 **{dup.duplicate_topic}**: "
+                    f"'{q_short}{ellipsis}'"
+                )
+
 
 def render_tab_statistics():
     """Вкладка статистики по колодам."""
@@ -1063,6 +1173,61 @@ def _display_generation_result(result: GenerationResult):
         ):
             for w in result.warnings:
                 st.warning(w)
+
+    # ── Найденные дубликаты ──
+    if result.duplicates_found:
+        with st.expander(
+                f"🔄 Найденные дубликаты в материалах "
+                f"({len(result.duplicates_found)})",
+                expanded=False,
+        ):
+            st.caption(
+                "Эти карточки дублируются в исходных материалах. "
+                "Рекомендуется удалить лишние вручную."
+            )
+
+            cross = [
+                d for d in result.duplicates_found
+                if d.is_cross_file
+            ]
+            same = [
+                d for d in result.duplicates_found
+                if not d.is_cross_file
+            ]
+
+            if cross:
+                st.markdown("**Между файлами:**")
+                for dup in cross:
+                    st.warning(
+                        f"📁 '{dup.question_preview[:60]}…' — "
+                        f"в **{dup.original_topic}** и "
+                        f"**{dup.duplicate_topic}**"
+                    )
+
+            if same:
+                st.markdown("**Внутри файлов:**")
+                for dup in same:
+                    st.info(
+                        f"📄 '{dup.question_preview[:60]}…' — "
+                        f"повторяется в **{dup.duplicate_topic}**"
+                    )
+
+    if result.duplicates_removed:
+        with st.expander(
+                f"🧹 Удалённые дубликаты из выходных файлов "
+                f"({len(result.duplicates_removed)})",
+                expanded=False,
+        ):
+            st.caption(
+                "Эти карточки были удалены из сгенерированных файлов "
+                "при дедупликации."
+            )
+
+            for dup in result.duplicates_removed:
+                st.caption(
+                    f"• '{dup.question_preview[:70]}…' "
+                    f"(из {dup.duplicate_source})"
+                )
 
 
 def render_tab_files(generator: CardGenerator):

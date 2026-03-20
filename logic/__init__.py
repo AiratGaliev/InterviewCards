@@ -29,6 +29,9 @@ from logic.utils import (
     compute_deck_statistics,
     FormatIssue,
     FileValidationReport,
+    DuplicateInfo,
+    find_all_duplicates,
+    generate_duplicate_report_text,
 )
 
 __all__ = [
@@ -67,4 +70,7 @@ __all__ = [
     'compute_deck_statistics',
     'FormatIssue',
     'FileValidationReport',
+    'DuplicateInfo',
+    'find_all_duplicates',
+    'generate_duplicate_report_text',
 ]
