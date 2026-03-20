@@ -3168,8 +3168,7 @@ def generate_anki_import_file(
     category = cards[0].category or 'general'
     # category/subcategory → Deck Prefix::Category::Subcategory
     category_parts = [
-        p.replace('_', ' ').title()
-        for p in category.split('/') if p
+        p for p in category.split('/') if p
     ]
     deck_name = f"{deck_prefix}::{'::'.join(category_parts)}"
 
