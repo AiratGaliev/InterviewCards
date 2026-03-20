@@ -21,6 +21,24 @@ from models.InterviewCard import InterviewCard
 logger = logging.getLogger(__name__)
 
 
+def _category_matches(
+        topic_category: str,
+        selected_categories: List[str],
+) -> bool:
+    """Иерархическое сравнение категорий.
+
+    - 'java/core' совпадает с выбранной 'java/core' (точно)
+    - 'java/core' совпадает с выбранной 'java' (родитель)
+    - 'java' НЕ совпадает с выбранной 'java/core' (ребёнок)
+    """
+    for sel_cat in selected_categories:
+        if topic_category == sel_cat:
+            return True
+        if topic_category.startswith(sel_cat + '/'):
+            return True
+    return False
+
+
 @dataclass
 class GenerationResult:
     """Результат генерации карточек"""
@@ -268,7 +286,9 @@ class CardGenerator:
 
             # Проверка категории
             if (selected_categories
-                    and topic_category not in selected_categories):
+                    and not _category_matches(
+                        topic_category, selected_categories
+                    )):
                 result.warnings.append(
                     f"Категория '{topic_category}' "
                     f"не выбрана: {topic_name}"

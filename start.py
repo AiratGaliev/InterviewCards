@@ -125,6 +125,25 @@ def invalidate_caches():
     _cached_find_duplicates.clear()
 
 
+def category_matches(
+        topic_category: str,
+        selected_categories: list,
+) -> bool:
+    """Иерархическое сравнение категорий для UI.
+
+    Выбор 'java' включает 'java', 'java/core' и т.д.
+    Выбор 'java/core' включает только 'java/core'.
+    """
+    if not selected_categories:
+        return True
+    for sel_cat in selected_categories:
+        if topic_category == sel_cat:
+            return True
+        if topic_category.startswith(sel_cat + '/'):
+            return True
+    return False
+
+
 def init_session_state(config, settings: UserSettings):
     defaults = {
         'export_format': settings.export_format,
@@ -387,7 +406,10 @@ def render_tab_topics(generator: CardGenerator):
     if selected_categories:
         filtered_topics = {
             name: data for name, data in topics.items()
-            if data.get('category', 'general') in selected_categories
+            if category_matches(
+                data.get('category', 'general'),
+                selected_categories,
+            )
         }
     else:
         filtered_topics = topics
@@ -1117,7 +1139,9 @@ def render_tab_generation(config, generator: CardGenerator):
         if categories:
             filtered_count = sum(
                 1 for data in topics.values()
-                if data.get('category', 'general') in categories
+                if category_matches(
+                    data.get('category', 'general'), categories
+                )
             )
         else:
             filtered_count = topics_count
@@ -1734,10 +1758,17 @@ def _render_category_manager(config):
         with col_ok:
             if st.button("✅", key="rename_ok", help="Применить"):
                 if config.rename_category(renaming, new_name):
-                    normalized = new_name.strip().lower().replace(' ', '_')
-                    normalized = re.sub(
-                        r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', normalized
-                    )
+                    # Нормализация с поддержкой /
+                    parts = new_name.strip().split('/')
+                    norm_parts = []
+                    for part in parts:
+                        p = part.strip().lower().replace(' ', '_')
+                        p = re.sub(
+                            r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', p
+                        )
+                        if p:
+                            norm_parts.append(p)
+                    normalized = '/'.join(norm_parts)
                     # Помечаем переименование для применения
                     st.session_state['_category_rename'] = (renaming, normalized)
                     st.session_state['renaming_category'] = None
@@ -1826,12 +1857,20 @@ def _render_category_manager(config):
         - Цифры: `0-9`
         - Подчёркивание: `_`
         - Дефис: `-`
+        - Слэш: `/` (разделитель подкатегорий)
 
         **Примеры:**
-        - `python` — язык программирования
-        - `system_design` — системный дизайн
-        - `data-structures` — структуры данных
-        - `sql` — базы данных
+        - `python` — категория
+        - `java/core` — категория/подкатегория
+        - `system_design` — категория
+        - `java/core/advanced` — многоуровневая
+
+        **Как работает иерархия:**
+        - Выбор `java` включает `java`, `java/core`, `java/core`
+        - Выбор `java/core` включает только `java/core`
+        - Файлы размещаются в `Materials/java/core/`
+        - Anki колода: `Interview::Java::Core`
+        - Obsidian тег: `#flashcards/java/core`
 
         **Автоматически:**
         - Пробелы → `_`

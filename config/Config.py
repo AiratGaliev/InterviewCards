@@ -184,8 +184,11 @@ class AppConfig:
         Returns:
             str: Имя колоды Anki (например, "Interview::Python")
         """
-        formatted_category = category.replace('_', ' ').title()
-        return f"Interview::{formatted_category}"
+        parts = category.split('/')
+        formatted_parts = [
+            p.replace('_', ' ').title() for p in parts if p
+        ]
+        return f"Interview::{'::'.join(formatted_parts)}"
 
     def get_deck_tag(self, category: str) -> str:
         """
@@ -212,7 +215,8 @@ class AppConfig:
         Returns:
             str: Путь к папке карточек
         """
-        return os.path.join(self.obsidian_vault, "Interview", "Cards", category)
+        parts = category.split('/')
+        return os.path.join(self.obsidian_vault, "Interview", "Cards", *parts)
 
     def get_materials_path(self, category: str) -> str:
         """
@@ -224,7 +228,8 @@ class AppConfig:
         Returns:
             str: Путь к папке материалов
         """
-        return os.path.join(self.obsidian_vault, "Interview", "Materials", category)
+        parts = category.split('/')
+        return os.path.join(self.obsidian_vault, "Interview", "Materials", *parts)
 
     def get_separators(self) -> dict:
         """
@@ -241,9 +246,18 @@ class AppConfig:
         }
 
     def add_category(self, category: str) -> bool:
-        """Добавляет новую категорию в список и сохраняет в config.ini."""
-        category = category.strip().lower().replace(' ', '_')
-        category = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', category)
+        parts = category.strip().split('/')
+        normalized_parts = []
+        for part in parts:
+            part = part.strip().lower().replace(' ', '_')
+            part = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', part)
+            if part:
+                normalized_parts.append(part)
+
+        if not normalized_parts:
+            return False
+
+        category = '/'.join(normalized_parts)
 
         if not category:
             return False
@@ -265,12 +279,19 @@ class AppConfig:
         return True
 
     def rename_category(self, old_name: str, new_name: str) -> bool:
-        """Переименовывает категорию."""
-        new_name = new_name.strip().lower().replace(' ', '_')
-        new_name = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', new_name)
+        parts = new_name.strip().split('/')
+        normalized_parts = []
+        for part in parts:
+            part = part.strip().lower().replace(' ', '_')
+            part = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', part)
+            if part:
+                normalized_parts.append(part)
 
-        if not new_name:
+        if not normalized_parts:
             return False
+
+        new_name = '/'.join(normalized_parts)
+
         if old_name not in self.categories:
             return False
         if new_name in self.categories:
@@ -352,17 +373,25 @@ class AppConfig:
         if not name or not name.strip():
             return False, '', 'Имя категории не может быть пустым'
 
-        normalized = name.strip().lower().replace(' ', '_')
-        normalized = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', normalized)
+        parts = name.strip().split('/')
+        normalized_parts = []
 
-        if not normalized:
+        for part in parts:
+            part = part.strip().lower().replace(' ', '_')
+            part = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', part)
+            if part:
+                normalized_parts.append(part)
+
+        if not normalized_parts:
             return False, '', 'Имя содержит только недопустимые символы'
+
+        normalized = '/'.join(normalized_parts)
 
         if len(normalized) < 2:
             return False, normalized, 'Минимум 2 символа'
 
-        if len(normalized) > 50:
-            return False, normalized, 'Максимум 50 символов'
+        if len(normalized) > 80:
+            return False, normalized, 'Максимум 80 символов'
 
         if normalized in self.categories:
             return False, normalized, f'Категория "{normalized}" уже существует'

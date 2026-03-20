@@ -2015,7 +2015,9 @@ def load_markdown_topics(input_dir: str) -> Dict[str, Dict]:
 
             rel_path = file_path.relative_to(input_path)
             if len(rel_path.parts) > 1:
-                category = rel_path.parts[0]
+                # Все директории (кроме имени файла) формируют категорию
+                # java/core/file.md → category = 'java/core'
+                category = '/'.join(rel_path.parts[:-1])
             else:
                 category = 'general'
 
@@ -3164,7 +3166,12 @@ def generate_anki_import_file(
         return created_files
 
     category = cards[0].category or 'general'
-    deck_name = f"{deck_prefix}::{category}"
+    # category/subcategory → Deck Prefix::Category::Subcategory
+    category_parts = [
+        p.replace('_', ' ').title()
+        for p in category.split('/') if p
+    ]
+    deck_name = f"{deck_prefix}::{'::'.join(category_parts)}"
 
     basic_cards: List[InterviewCard] = [
         c for c in cards
