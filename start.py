@@ -51,6 +51,79 @@ SEVERITY_EMOJI = {
 
 APP_VERSION = "2.1"
 
+CARDS_PER_PAGE = 25
+
+
+def _get_dir_mtime(dir_path: str) -> float:
+    """Время последнего изменения .md файлов в директории."""
+    latest = 0.0
+    if not os.path.exists(dir_path):
+        return latest
+    try:
+        for root, _, files in os.walk(dir_path):
+            for f in files:
+                if f.endswith('.md'):
+                    try:
+                        mt = os.path.getmtime(os.path.join(root, f))
+                        if mt > latest:
+                            latest = mt
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return latest
+
+
+def _get_file_mtime(file_path: str) -> float:
+    try:
+        return os.path.getmtime(file_path)
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_load_topics(input_dir: str, dir_mtime: float) -> dict:
+    return load_markdown_topics(input_dir)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_parse_cards(file_path: str, file_mtime: float) -> list:
+    return parse_cards_from_markdown(file_path)
+
+
+@st.cache_data(ttl=300, show_spinner="Подсчёт статистики...")
+def _cached_statistics(input_dir: str, dir_mtime: float) -> dict:
+    return compute_deck_statistics(input_dir)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_find_duplicates(input_dir: str, dir_mtime: float) -> list:
+    return find_all_duplicates(input_dir)
+
+
+def get_topics(input_dir: str) -> dict:
+    """Загружает темы с кэшированием по mtime директории."""
+    if not os.path.exists(input_dir):
+        return {}
+    mtime = _get_dir_mtime(input_dir)
+    return _cached_load_topics(input_dir, mtime)
+
+
+def get_cards(file_path: str) -> list:
+    """Парсит карточки из файла с кэшированием по mtime файла."""
+    if not os.path.exists(file_path):
+        return []
+    mtime = _get_file_mtime(file_path)
+    return _cached_parse_cards(file_path, mtime)
+
+
+def invalidate_caches():
+    """Сброс всех кэшей (после генерации или изменения файлов)."""
+    _cached_load_topics.clear()
+    _cached_parse_cards.clear()
+    _cached_statistics.clear()
+    _cached_find_duplicates.clear()
+
 
 def init_session_state(config, settings: UserSettings):
     defaults = {
@@ -130,11 +203,13 @@ def reset_generation_state():
 
 def reset_all_settings():
     UserSettings().save()
+    invalidate_caches()
     keys_to_clear = [
         'input_dir', 'selected_categories', 'export_format',
         'use_reverse_cards', 'clean_duplicates', 'preview_length',
         'generated_files', 'generation_complete', 'last_result',
         'search_query', 'new_category_input', 'renaming_category',
+        'validation_reports', 'found_duplicates',
     ]
     for key in keys_to_clear:
         if key in st.session_state:
@@ -187,15 +262,16 @@ def render_sidebar(config, generator: CardGenerator):
         input_dir = st.session_state['input_dir']
 
         if os.path.exists(input_dir):
-            is_valid, msg = generator.validate_input_directory(input_dir)
-            if is_valid:
-                st.success(f"✅ {msg}")
+            # ── Используем кэшированную загрузку вместо validate_input_directory ──
+            topics = get_topics(input_dir)
+            if topics:
+                st.success(f"✅ Найдено тем: {len(topics)}")
             else:
-                st.warning(f"⚠️ {msg}")
+                st.warning("⚠️ Нет Markdown файлов в папке")
         else:
             st.error("❌ Папка не найдена")
             if st.button(
-                    "📝 Создать с примером",
+                    "📁 Создать с примером",
                     use_container_width=True,
             ):
                 try:
@@ -205,10 +281,12 @@ def render_sidebar(config, generator: CardGenerator):
                     )
                     path = generator.create_example_file(input_dir, tpl)
                     st.success(f"✅ Создан: {path}")
+                    invalidate_caches()
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ {e}")
 
+        # ── Остаток функции без изменений ──
         st.divider()
 
         st.multiselect(
@@ -295,12 +373,13 @@ def render_tab_topics(generator: CardGenerator):
         )
         return
 
-    topics = load_markdown_topics(input_dir)
+    # ── Кэшированная загрузка ──
+    topics = get_topics(input_dir)
 
     if not topics:
         st.warning("⚠️ Нет Markdown файлов в указанной папке")
         st.info(
-            "Нажмите **📝 Создать с примером** "
+            "Нажмите **📁 Создать с примером** "
             "в боковой панели"
         )
         return
@@ -347,9 +426,10 @@ def render_tab_topics(generator: CardGenerator):
             )
         return
 
+    # ── Таблица тем (с кэшированным парсингом) ──
     table_data = []
     for name, data in filtered_topics.items():
-        cards = parse_cards_from_markdown(data['path'])
+        cards = get_cards(data['path'])  # ← КЭШИРОВАНО
 
         type_counts = {}
         for card in cards:
@@ -360,7 +440,7 @@ def render_tab_topics(generator: CardGenerator):
             f"{count}× {label}" for label, count in type_counts.items()
         )
 
-        # Быстрая проверка смешения форматов
+        # ── Быстрая проверка смешения форматов ──
         has_mix = len(type_counts) > 2
         mix_indicator = " ⚠️" if has_mix else ""
 
@@ -397,7 +477,7 @@ def render_tab_topics(generator: CardGenerator):
 
     st.divider()
 
-    # --- Поиск по карточкам ---
+    # ── Поиск (с кэшированным парсингом) ──
     st.markdown("### 🔎 Поиск по карточкам")
 
     search_col1, search_col2 = st.columns([3, 1])
@@ -419,7 +499,7 @@ def render_tab_topics(generator: CardGenerator):
     if search_query and search_query.strip():
         all_cards_for_search = []
         for name, data in filtered_topics.items():
-            cards = parse_cards_from_markdown(data['path'])
+            cards = get_cards(data['path'])  # ← КЭШИРОВАНО
             all_cards_for_search.extend(cards)
 
         search_in_q = search_in in ("Везде", "Вопросах")
@@ -434,30 +514,43 @@ def render_tab_topics(generator: CardGenerator):
 
         if found_cards:
             st.success(f"Найдено: {len(found_cards)} карточек")
-            for i, card in enumerate(found_cards[:20]):
+
+            # ── Пагинация результатов поиска ──
+            show_count = min(len(found_cards), 20)
+            for i, card in enumerate(found_cards[:show_count]):
                 emoji = CARD_TYPE_EMOJI.get(card.card_type, "⚪")
-                title = card.question[:80] + ("…" if len(card.question) > 80 else "")
-                with st.expander(f"{emoji} {title} [{card.topic}]", expanded=False):
+                title = card.question[:80] + (
+                    "…" if len(card.question) > 80 else ""
+                )
+                with st.expander(
+                        f"{emoji} {title} [{card.topic}]",
+                        expanded=False,
+                ):
                     col_f, col_b = st.columns(2)
                     with col_f:
                         st.markdown("**Front:**")
-                        # Подсветка найденного текста
-                        q_display = card.question[:500]
-                        st.markdown(f"> {q_display}")
+                        st.markdown(f"> {card.question[:500]}")
                     with col_b:
                         st.markdown("**Back:**")
-                        a_display = card.answer[:500]
-                        st.markdown(f"> {a_display}")
-                    st.caption(f"Тема: {card.topic} · Тип: {CARD_TYPE_LABELS.get(card.card_type, '?')}")
+                        st.markdown(f"> {card.answer[:500]}")
+                    st.caption(
+                        f"Тема: {card.topic} · "
+                        f"Тип: {CARD_TYPE_LABELS.get(card.card_type, '?')}"
+                    )
 
-            if len(found_cards) > 20:
-                st.info(f"Показано 20 из {len(found_cards)} результатов")
+            if len(found_cards) > show_count:
+                st.info(
+                    f"Показано {show_count} из "
+                    f"{len(found_cards)} результатов"
+                )
         else:
-            st.info(f"Ничего не найдено по запросу: «{search_query}»")
+            st.info(
+                f"Ничего не найдено по запросу: «{search_query}»"
+            )
 
         st.divider()
 
-    # --- Предпросмотр темы ---
+    # ── Предпросмотр темы ──
     st.markdown("### 🔍 Предпросмотр темы")
 
     topic_names = list(filtered_topics.keys())
@@ -502,7 +595,8 @@ def render_tab_topics(generator: CardGenerator):
         else:
             st.code(content, language="markdown")
 
-    cards = parse_cards_from_markdown(topic_data['path'])
+    # ── Карточки (кэшировано) ──
+    cards = get_cards(topic_data['path'])
 
     if not cards:
         st.warning("Карточки не найдены в этой теме")
@@ -517,10 +611,11 @@ def render_tab_topics(generator: CardGenerator):
     reverse_count = sum(1 for c in cards if c.is_reverse)
     col3.metric("Обратных", reverse_count)
 
-    # --- Предупреждение о смешении форматов (inline) ---
+    # ── Предупреждение о смешении форматов (inline) ──
     if len(unique_types) > 2:
         st.warning(
-            f"⚠️ В этой теме используется {len(unique_types)} типов карточек. "
+            f"⚠️ В этой теме используется {len(unique_types)} "
+            f"типов карточек. "
             f"Это может привести к неожиданному парсингу. "
             f"Рекомендуется использовать 1-2 типа на файл. "
             f"Подробности — на вкладке **🔍 Валидация**."
@@ -545,9 +640,31 @@ def render_tab_topics(generator: CardGenerator):
         if type_filter:
             cards = [c for c in cards if c.card_type in type_filter]
 
+    # ── Пагинация карточек ──
+    total_pages = max(1, (len(cards) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE)
     st.markdown(f"#### Карточки ({len(cards)})")
 
-    for i, card in enumerate(cards):
+    if total_pages > 1:
+        page = st.number_input(
+            "Страница",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            key="cards_page",
+        )
+        st.caption(
+            f"Страница {page} из {total_pages} "
+            f"(по {CARDS_PER_PAGE} на страницу)"
+        )
+    else:
+        page = 1
+
+    start_idx = (page - 1) * CARDS_PER_PAGE
+    end_idx = start_idx + CARDS_PER_PAGE
+    page_cards = cards[start_idx:end_idx]
+
+    for i, card in enumerate(page_cards):
+        card_num = start_idx + i
         emoji = CARD_TYPE_EMOJI.get(card.card_type, "⚪")
         label = CARD_TYPE_LABELS.get(
             card.card_type, card.card_type.value
@@ -560,8 +677,8 @@ def render_tab_topics(generator: CardGenerator):
             title_text = f"↩️ {title_text}"
 
         with st.expander(
-                f"{emoji} #{i + 1} {title_text}",
-                expanded=(i == 0),
+                f"{emoji} #{card_num + 1} {title_text}",
+                expanded=(card_num == 0 and page == 1),
         ):
             meta_parts = [f"**Тип:** {label}"]
             if card.is_reverse:
@@ -774,9 +891,9 @@ def render_tab_validation():
             use_container_width=True,
             key="find_duplicates_btn",
     ):
-        with st.spinner("Поиск дубликатов..."):
-            duplicates = find_all_duplicates(input_dir)
-            st.session_state['found_duplicates'] = duplicates
+        dir_mtime = _get_dir_mtime(input_dir)
+        duplicates = _cached_find_duplicates(input_dir, dir_mtime)
+        st.session_state['found_duplicates'] = duplicates
 
     duplicates = st.session_state.get('found_duplicates', None)
 
@@ -871,7 +988,6 @@ def render_tab_validation():
 
 
 def render_tab_statistics():
-    """Вкладка статистики по колодам."""
     input_dir = st.session_state.get('input_dir', '')
 
     st.markdown("### 📊 Статистика")
@@ -880,14 +996,15 @@ def render_tab_statistics():
         st.info("📁 Укажите путь к папке с материалами")
         return
 
-    with st.spinner("Подсчёт статистики..."):
-        stats = compute_deck_statistics(input_dir)
+    # ── Кэшированная статистика ──
+    dir_mtime = _get_dir_mtime(input_dir)
+    stats = _cached_statistics(input_dir, dir_mtime)
 
     if stats['total_files'] == 0:
         st.warning("Нет файлов для анализа")
         return
 
-    # --- Общая сводка ---
+    # ── Остальной код без изменений ──
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📄 Файлов", stats['total_files'])
     col2.metric("📝 Карточек", stats['total_cards'])
@@ -902,7 +1019,6 @@ def render_tab_statistics():
 
     st.divider()
 
-    # --- По типам ---
     if stats['by_type']:
         st.markdown("#### По типам карточек")
 
@@ -915,34 +1031,46 @@ def render_tab_statistics():
         }
 
         type_data = []
-        for type_name, count in sorted(stats['by_type'].items(), key=lambda x: -x[1]):
+        for type_name, count in sorted(
+                stats['by_type'].items(), key=lambda x: -x[1]
+        ):
             label = type_labels.get(type_name, type_name)
-            pct = (count / stats['total_cards'] * 100) if stats['total_cards'] else 0
+            pct = (
+                (count / stats['total_cards'] * 100)
+                if stats['total_cards'] else 0
+            )
             type_data.append({
                 "Тип": label,
                 "Количество": count,
                 "Доля": f"{pct:.1f}%",
             })
 
-        st.dataframe(type_data, use_container_width=True, hide_index=True)
+        st.dataframe(
+            type_data, use_container_width=True, hide_index=True
+        )
 
-    # --- По колодам ---
     if stats['by_deck']:
         st.markdown("#### По колодам")
         deck_data = []
-        for deck, count in sorted(stats['by_deck'].items(), key=lambda x: -x[1]):
+        for deck, count in sorted(
+                stats['by_deck'].items(), key=lambda x: -x[1]
+        ):
             deck_data.append({"Колода": deck, "Карточек": count})
-        st.dataframe(deck_data, use_container_width=True, hide_index=True)
+        st.dataframe(
+            deck_data, use_container_width=True, hide_index=True
+        )
 
-    # --- По категориям ---
     if stats['by_category']:
         st.markdown("#### По категориям")
         cat_data = []
-        for cat, count in sorted(stats['by_category'].items(), key=lambda x: -x[1]):
+        for cat, count in sorted(
+                stats['by_category'].items(), key=lambda x: -x[1]
+        ):
             cat_data.append({"Категория": cat, "Карточек": count})
-        st.dataframe(cat_data, use_container_width=True, hide_index=True)
+        st.dataframe(
+            cat_data, use_container_width=True, hide_index=True
+        )
 
-    # --- По файлам ---
     if stats['by_file']:
         with st.expander("📄 Детали по файлам", expanded=False):
             file_data = []
@@ -957,14 +1085,19 @@ def render_tab_statistics():
                     "Карточек": info['cards'],
                     "Типы": types_str,
                 })
-            st.dataframe(file_data, use_container_width=True, hide_index=True)
+            st.dataframe(
+                file_data, use_container_width=True, hide_index=True
+            )
 
-    # --- Рекорды ---
     st.markdown("#### 🏆 Рекорды")
     q_text, q_len = stats['longest_question']
     a_text, a_len = stats['longest_answer']
-    st.caption(f"Самый длинный вопрос: {q_len} сим. — «{q_text}…»")
-    st.caption(f"Самый длинный ответ: {a_len} сим. — «{a_text}…»")
+    st.caption(
+        f"Самый длинный вопрос: {q_len} сим. — «{q_text}…»"
+    )
+    st.caption(
+        f"Самый длинный ответ: {a_len} сим. — «{a_text}…»"
+    )
 
 
 def render_tab_generation(config, generator: CardGenerator):
@@ -978,7 +1111,7 @@ def render_tab_generation(config, generator: CardGenerator):
     filtered_count = 0
 
     if os.path.exists(input_dir):
-        topics = load_markdown_topics(input_dir)
+        topics = get_topics(input_dir)  # ← КЭШИРОВАНО
         topics_count = len(topics)
 
         if categories:
@@ -1117,6 +1250,9 @@ def render_tab_generation(config, generator: CardGenerator):
 
             progress_bar.progress(1.0, text="✅ Завершено!")
             status_text.empty()
+
+            # ── Сбрасываем кэш — файлы изменились ──
+            invalidate_caches()
 
             st.session_state['last_result'] = result
             st.session_state['generated_files'] = result.output_files
