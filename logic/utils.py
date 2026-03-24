@@ -85,6 +85,98 @@ BIDIRECTIONAL_CARD_TYPES = (
 )
 
 
+def _strip_formatting_for_separator_check(text: str) -> str:
+    """Убирает содержимое inline code, bold и italic
+    для проверки разделителей.
+
+    `ClassName::method`   → \x00
+    **Class::method**     → \x00
+    *Class::method*       → \x00
+    ~~Class::method~~     → \x00
+
+    Разделитель ВНЕ форматирования сохраняется:
+    `code`::answer → \x00::answer
+    """
+    # Порядок важен: сначала более специфичные
+    result = re.sub(r'`[^`]*`', '\x00', text)
+    result = re.sub(r'\*\*[^*]+\*\*', '\x00', result)
+    result = re.sub(r'(?<!\*)\*(?!\*)[^*]+\*(?!\*)', '\x00', result)
+    result = re.sub(r'~~[^~]+~~', '\x00', result)
+    return result
+
+
+def _find_separator_position(line: str, separator: str) -> int:
+    """Находит позицию первого separator вне inline code,
+    bold, italic и strikethrough.
+
+    Для '::' пропускает позиции, являющиеся частью ':::'.
+    Возвращает -1, если не найден.
+    """
+    protected_ranges: List[Tuple[int, int]] = []
+
+    # inline code
+    for m in re.finditer(r'`[^`]*`', line):
+        protected_ranges.append((m.start(), m.end()))
+    # bold **...**
+    for m in re.finditer(r'\*\*[^*]+\*\*', line):
+        protected_ranges.append((m.start(), m.end()))
+    # italic *...* (не bold)
+    for m in re.finditer(r'(?<!\*)\*(?!\*)[^*]+\*(?!\*)', line):
+        protected_ranges.append((m.start(), m.end()))
+    # strikethrough ~~...~~
+    for m in re.finditer(r'~~[^~]+~~', line):
+        protected_ranges.append((m.start(), m.end()))
+
+    # Сортируем для корректного перепрыгивания
+    protected_ranges.sort(key=lambda r: r[0])
+
+    def _is_protected(pos: int) -> bool:
+        return any(s <= pos < e for s, e in protected_ranges)
+
+    sep_len = len(separator)
+    idx = 0
+
+    while idx <= len(line) - sep_len:
+        if _is_protected(idx):
+            for s, e in protected_ranges:
+                if s <= idx < e:
+                    idx = e
+                    break
+            continue
+
+        if line[idx:idx + sep_len] != separator:
+            idx += 1
+            continue
+
+        if separator == '::' and sep_len == 2:
+            before_is_colon = (
+                    idx > 0
+                    and line[idx - 1] == ':'
+                    and not _is_protected(idx - 1)
+            )
+            after_is_colon = (
+                    idx + 2 < len(line)
+                    and line[idx + 2] == ':'
+                    and not _is_protected(idx + 2)
+            )
+            if before_is_colon or after_is_colon:
+                idx += 1
+                continue
+
+        return idx
+
+    return -1
+
+
+def _strip_all_formatting(text: str) -> str:
+    """Убирает содержимое inline code для проверки cloze.
+
+    `a == b`  → убрано (== — оператор, не cloze)
+    ==text==  → сохранено (настоящий cloze)
+    """
+    return re.sub(r'`[^`]*`', '', text)
+
+
 # ──────────────────────────────────────────────────────
 #  ВАЛИДАЦИЯ И ДИАГНОСТИКА ФОРМАТОВ
 # ──────────────────────────────────────────────────────
@@ -489,9 +581,11 @@ def _detect_line_format_for_validation(
     if stripped == '?':
         return 'multi_line_basic_sep'
 
-    # Убираем inline-код перед проверкой :: и :::
-    # чтобы не ловить :: внутри `code`
+    # Убираем inline-код, bold, italic, strikethrough
     text_no_inline_code = re.sub(r'`[^`]*`', '___CODE___', stripped)
+    text_no_inline_code = re.sub(r'\*\*[^*]+\*\*', '___CODE___', text_no_inline_code)
+    text_no_inline_code = re.sub(r'(?<!\*)\*(?!\*)[^*]+\*(?!\*)', '___CODE___', text_no_inline_code)
+    text_no_inline_code = re.sub(r'~~[^~]+~~', '___CODE___', text_no_inline_code)
 
     # Bidirectional ::: — проверяем ДО basic ::
     # Условие: ровно одно ::: в строке, обе стороны непустые
@@ -517,7 +611,7 @@ def _detect_line_format_for_validation(
 
     # Cloze — парные ==текст== (не оператор сравнения)
     # Сначала убираем inline-код, потом ищем cloze
-    text_for_cloze = re.sub(r'`[^`]*`', '', stripped)
+    text_for_cloze = _strip_all_formatting(stripped)
     if re.search(r'==\S.*?\S==|==\S==', text_for_cloze):
         return 'cloze'
 
@@ -1728,23 +1822,39 @@ def remove_scheduling_comment(text: str) -> str:
 
 
 def build_cloze_question(text: str) -> str:
+    """Строит вопрос из cloze-текста, маскируя пропуски.
+    Игнорирует == внутри inline code.
+    """
     if not text:
         return "Cloze"
 
-    masked = text
+    # Защищаем inline code
+    code_blocks: List[str] = []
 
+    def _save_code(m):
+        idx = len(code_blocks)
+        code_blocks.append(m.group(0))
+        return f"\x02CODE{idx}\x02"
+
+    masked = re.sub(r'`[^`]*`', _save_code, text)
+
+    # Маскируем cloze-пропуски
     masked = re.sub(
         r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]',
         lambda m: f"[{m.group(2).strip() or '...'}]",
-        masked
+        masked,
     )
     masked = re.sub(
         r'==(.+?)==\^\[([^\]]*)\](?!\[\^)',
         lambda m: f"[{m.group(2).strip() or '...'}]",
-        masked
+        masked,
     )
     masked = re.sub(r'==(.+?)==\[\^([ahs]+)\]', '[...]', masked)
     masked = re.sub(r'==(.+?)==', '[...]', masked)
+
+    # Восстанавливаем inline code
+    for idx, code in enumerate(code_blocks):
+        masked = masked.replace(f"\x02CODE{idx}\x02", code)
 
     masked = re.sub(r'[ \t]+', ' ', masked)
     masked = re.sub(r'\n{3,}', '\n\n', masked)
@@ -1754,14 +1864,28 @@ def build_cloze_question(text: str) -> str:
 
 
 def reveal_cloze_text(text: str) -> str:
+    """Раскрывает cloze, оборачивая в bold.
+    Игнорирует == внутри inline code.
+    """
     if not text:
         return ""
 
-    revealed = text
+    code_blocks: List[str] = []
+
+    def _save_code(m):
+        idx = len(code_blocks)
+        code_blocks.append(m.group(0))
+        return f"\x02CODE{idx}\x02"
+
+    revealed = re.sub(r'`[^`]*`', _save_code, text)
+
     revealed = re.sub(r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]', r'**\1**', revealed)
     revealed = re.sub(r'==(.+?)==\^\[([^\]]*)\](?!\[\^)', r'**\1**', revealed)
     revealed = re.sub(r'==(.+?)==\[\^([ahs]+)\]', r'**\1**', revealed)
     revealed = re.sub(r'==(.+?)==', r'**\1**', revealed)
+
+    for idx, code in enumerate(code_blocks):
+        revealed = revealed.replace(f"\x02CODE{idx}\x02", code)
 
     return revealed
 
@@ -2099,26 +2223,49 @@ def extract_card_metadata(content: str) -> Tuple[str, Dict]:
 def detect_card_format(line: str) -> Optional[CardType]:
     line = line.strip()
 
-    if re.match(PATTERNS['single_line_bidirectional'], line):
+    # Убираем содержимое inline code и bold —
+    # внутри них :: и ::: не являются разделителями карточек
+    text_clean = _strip_formatting_for_separator_check(line)
+
+    if re.match(PATTERNS['single_line_bidirectional'], text_clean):
         return CardType.SINGLE_LINE_BIDIRECTIONAL
 
-    if ':::' not in line and re.match(PATTERNS['single_line_basic'], line):
+    if ':::' not in text_clean and re.match(
+            PATTERNS['single_line_basic'], text_clean
+    ):
         return CardType.SINGLE_LINE_BASIC
 
     return None
 
 
 def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
+    """Парсит cloze-пропуски, игнорируя == внутри inline code."""
     deletions: List[ClozeDeletion] = []
 
+    # Собираем защищённые диапазоны (inline code)
+    protected_ranges: List[Tuple[int, int]] = []
+    for m in re.finditer(r'`[^`]*`', text):
+        protected_ranges.append((m.start(), m.end()))
+
+    def _is_protected(pos: int) -> bool:
+        return any(s <= pos < e for s, e in protected_ranges)
+
+    # 1. ==text==[^actions]
     for match in re.finditer(r'==(.+?)==\[\^([ahs]+)\]', text):
+        if _is_protected(match.start()):
+            continue
         deletions.append(ClozeDeletion(
             text=match.group(1),
             position=match.start(),
             actions=match.group(2),
         ))
 
-    for match in re.finditer(r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]', text):
+    # 2. ==text==^[hint][^seq]
+    for match in re.finditer(
+            r'==(.+?)==\^\[([^\]]*)\]\[\^(\d+)\]', text
+    ):
+        if _is_protected(match.start()):
+            continue
         if not any(d.position == match.start() for d in deletions):
             deletions.append(ClozeDeletion(
                 text=match.group(1),
@@ -2127,7 +2274,12 @@ def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
                 sequence=int(match.group(3)),
             ))
 
-    for match in re.finditer(r'==(.+?)==\^\[([^\]]*)\](?!\[\^)', text):
+    # 3. ==text==^[hint]
+    for match in re.finditer(
+            r'==(.+?)==\^\[([^\]]*)\](?!\[\^)', text
+    ):
+        if _is_protected(match.start()):
+            continue
         if not any(d.position == match.start() for d in deletions):
             deletions.append(ClozeDeletion(
                 text=match.group(1),
@@ -2135,9 +2287,14 @@ def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
                 hint=match.group(2) if match.group(2) else None,
             ))
 
+    # 4. ==text== (простой)
     for match in re.finditer(r'==(.+?)==', text):
+        if _is_protected(match.start()):
+            continue
         end_pos = match.end()
-        if end_pos < len(text) and text[end_pos:end_pos + 2] in ['^[', '[^']:
+        if end_pos < len(text) and text[end_pos:end_pos + 2] in [
+            '^[', '[^'
+        ]:
             continue
         if not any(d.position == match.start() for d in deletions):
             deletions.append(ClozeDeletion(
@@ -2150,7 +2307,9 @@ def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
 
 
 def has_cloze_deletions(text: str) -> bool:
-    return bool(re.search(r'==.+?==', text, re.DOTALL))
+    """Проверяет наличие cloze-разметки ==...== вне inline code."""
+    cleaned = _strip_all_formatting(text)
+    return bool(re.search(r'==.+?==', cleaned, re.DOTALL))
 
 
 def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
@@ -2270,9 +2429,13 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                     continue
 
                 if card_type == CardType.SINGLE_LINE_BASIC:
-                    question, answer = line.split('::', 1)
-                    question = question.strip()
-                    answer = remove_scheduling_comment(answer.strip())
+                    sep_pos = _find_separator_position(line, '::')
+                    if sep_pos < 0:
+                        continue
+                    question = line[:sep_pos].strip()
+                    answer = remove_scheduling_comment(
+                        line[sep_pos + 2:].strip()
+                    )
                     scheduling = extract_scheduling_data(line)
 
                     if has_cloze_deletions(answer):
@@ -2295,9 +2458,15 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
                         card_id += 1
 
                 elif card_type == CardType.SINGLE_LINE_BIDIRECTIONAL:
-                    info1, info2 = line.split(':::', 1)
-                    info1 = remove_scheduling_comment(info1.strip())
-                    info2 = remove_scheduling_comment(info2.strip())
+                    sep_pos = _find_separator_position(line, ':::')
+                    if sep_pos < 0:
+                        continue
+                    info1 = remove_scheduling_comment(
+                        line[:sep_pos].strip()
+                    )
+                    info2 = remove_scheduling_comment(
+                        line[sep_pos + 3:].strip()
+                    )
                     scheduling = extract_scheduling_data(line)
 
                     card1 = InterviewCard(
