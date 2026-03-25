@@ -2035,6 +2035,14 @@ def is_card_boundary_block(block: str) -> bool:
         return True
     if split_multiline_block(stripped):
         return True
+
+    # Standalone separator или блок, начинающийся с разделителя
+    if stripped in ('?', '??'):
+        return True
+    first_line = get_first_nonempty_line(stripped)
+    if first_line in ('?', '??'):
+        return True
+
     if is_standalone_cloze_block(stripped):
         return True
 
@@ -2312,6 +2320,171 @@ def has_cloze_deletions(text: str) -> bool:
     return bool(re.search(r'==.+?==', cleaned, re.DOTALL))
 
 
+def _is_hard_boundary(block_text: str) -> bool:
+    """Проверяет, является ли блок жёсткой границей карточки.
+
+    Используется при препроцессинге standalone-разделителей ?/??
+    для определения, где остановить сбор вопроса/ответа.
+    """
+    stripped = block_text.strip()
+    if not stripped:
+        return True
+    if stripped == '---':
+        return True
+    if stripped.startswith('#') and not stripped.startswith('```'):
+        return True
+    if stripped in ('?', '??'):
+        return True
+    first_line = get_first_nonempty_line(stripped)
+    if first_line in ('?', '??'):
+        return True
+    if split_multiline_block(stripped) is not None:
+        return True
+    if contains_single_line_card_syntax(stripped):
+        return True
+    if is_legacy_question_block(stripped):
+        return True
+    if is_standalone_cloze_block(stripped):
+        return True
+    return False
+
+
+def _preprocess_standalone_separators(
+        blocks: List[str],
+) -> List[str]:
+    """Мержит standalone/leading ? и ?? с окружающими блоками.
+
+    Обрабатывает случаи, когда ? или ?? находится в отдельном блоке
+    (отделён от вопроса и ответа пустыми строками), или когда
+    блок начинается с ? с ответом на следующих строках.
+
+    Эвристика для вопроса (назад):
+      Берём code-блоки + первый text-блок перед ними.
+      Останавливаемся на втором text-блоке или жёсткой границе.
+
+    Эвристика для ответа (вперёд, только standalone):
+      Берём code-блоки + первый text-блок после них.
+      Останавливаемся на втором text-блоке, следующем
+      разделителе или жёсткой границе.
+    """
+    # ── Находим позиции разделителей ──
+    sep_positions: Dict[int, str] = {}
+    for idx, block in enumerate(blocks):
+        stripped = block.strip()
+        if stripped in ('?', '??'):
+            sep_positions[idx] = stripped
+        else:
+            first_line = get_first_nonempty_line(stripped)
+            if first_line in ('?', '??'):
+                sep_positions[idx] = first_line
+
+    if not sep_positions:
+        return blocks
+
+    result: List[str] = []
+    i = 0
+
+    while i < len(blocks):
+        if i not in sep_positions:
+            result.append(blocks[i])
+            i += 1
+            continue
+
+        separator = sep_positions[i]
+        block_text = blocks[i].strip()
+        is_standalone = (block_text == separator)
+
+        # Встроенный ответ (блок вида "?\nответ...")
+        if is_standalone:
+            embedded_answer = ''
+        else:
+            block_lines = block_text.splitlines()
+            embedded_answer = '\n'.join(block_lines[1:]).strip()
+
+        # ── Назад: собираем вопрос ──
+        question_parts: List[str] = []
+        found_text = False
+
+        while result:
+            candidate = result[-1].strip()
+            if _is_hard_boundary(candidate):
+                break
+
+            is_code = candidate.startswith('```')
+
+            if is_code:
+                if found_text:
+                    # Код-блок ДО текста вопроса (в прямом порядке)
+                    # скорее всего принадлежит ответу предыдущей
+                    # карточки, а не текущему вопросу
+                    break
+                question_parts.insert(0, result.pop())
+            elif not found_text:
+                # Первый text-блок — включаем
+                question_parts.insert(0, result.pop())
+                found_text = True
+            else:
+                # Второй text-блок — стоп (граница A/Q)
+                break
+
+        # ── Вперёд: собираем ответ (только standalone) ──
+        answer_parts: List[str] = []
+        j = i + 1
+
+        if is_standalone:
+            fwd_found_text = False
+            while j < len(blocks):
+                if j in sep_positions:
+                    break
+                candidate = blocks[j].strip()
+                if _is_hard_boundary(candidate):
+                    break
+
+                is_code = candidate.startswith('```')
+
+                if is_code:
+                    answer_parts.append(blocks[j])
+                    j += 1
+                elif not fwd_found_text:
+                    answer_parts.append(blocks[j])
+                    fwd_found_text = True
+                    j += 1
+                else:
+                    # Второй text-блок — может быть
+                    # началом следующего вопроса
+                    break
+
+        # ── Собираем итоговый блок ──
+        if question_parts:
+            question_text = '\n\n'.join(
+                p.strip() for p in question_parts if p.strip()
+            )
+
+            all_answer: List[str] = []
+            if embedded_answer:
+                all_answer.append(embedded_answer)
+            for ap in answer_parts:
+                s = ap.strip()
+                if s:
+                    all_answer.append(s)
+            answer_text = '\n\n'.join(all_answer)
+
+            if answer_text:
+                merged = f"{question_text}\n{separator}\n{answer_text}"
+            else:
+                merged = f"{question_text}\n{separator}"
+
+            result.append(merged.strip())
+        else:
+            # Нет вопроса — оставляем как есть
+            result.append(blocks[i])
+            j = i + 1
+
+        i = j
+
+    return result
+
+
 def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[InterviewCard]:
     cards: List[InterviewCard] = []
     card_id = start_id
@@ -2330,6 +2503,7 @@ def parse_cards_from_markdown(file_path: str, start_id: int = 1) -> List[Intervi
 
     content_without_fm = strip_frontmatter(content)
     blocks = split_markdown_blocks(content_without_fm)
+    blocks = _preprocess_standalone_separators(blocks)
 
     all_cards: List[InterviewCard] = []
     cloze_keys: Set[str] = set()
