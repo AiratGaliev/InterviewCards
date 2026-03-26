@@ -54,6 +54,8 @@ class UserSettings:
         try:
             self.last_saved = datetime.now().isoformat(timespec='seconds')
             data = asdict(self)
+            # Убираем внутреннее поле
+            data.pop('_loaded_from_file', None)
 
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
@@ -89,9 +91,10 @@ class UserSettings:
 
             # Фильтруем только известные поля (для обратной совместимости)
             valid_fields = set(cls.__dataclass_fields__.keys())
-            filtered = {k: v for k, v in data.items() if k in valid_fields}
+            filtered = {k: v for k, v in data.items() if k in valid_fields and k != '_loaded_from_file'}
 
             settings = cls(**filtered)
+            settings._loaded_from_file = True
             logger.info(f"Настройки загружены: {path}")
             return settings
 
@@ -104,7 +107,9 @@ class UserSettings:
 
     def to_dict(self) -> Dict[str, Any]:
         """Конвертирует настройки в словарь."""
-        return asdict(self)
+        data = asdict(self)
+        data.pop('_loaded_from_file', None)
+        return data
 
     def merge_with_config(self, config) -> 'UserSettings':
         """

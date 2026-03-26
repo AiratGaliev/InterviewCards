@@ -145,11 +145,40 @@ def category_matches(
 
 
 def init_session_state(config, settings: UserSettings):
+    """Инициализация session_state из сохранённых настроек.
+
+    Значения из settings (файл .json) имеют приоритет
+    над defaults. Повторная инициализация не перезаписывает
+    уже установленные значения в session_state.
+    """
+
+    # ── input_dir: приоритет saved > config ──
+    if 'input_dir' not in st.session_state:
+        saved_dir = settings.input_dir or settings.last_input_dir
+        st.session_state['input_dir'] = (
+            saved_dir if saved_dir else config.materials_source
+        )
+
+    # ── selected_categories: приоритет saved (даже если пустой) ──
+    if 'selected_categories' not in st.session_state:
+        if settings.selected_categories is not None:
+            # Фильтруем только те, что есть в config
+            valid = [
+                c for c in settings.selected_categories
+                if c in config.categories
+            ]
+            st.session_state['selected_categories'] = valid
+        else:
+            # settings.selected_categories is None —
+            # файл настроек отсутствует или повреждён
+            st.session_state['selected_categories'] = []
+
+    # ── Остальные настройки: saved > default ──
     defaults = {
-        'export_format': settings.export_format,
+        'export_format': settings.export_format or 'both',
         'use_reverse_cards': settings.use_reverse_cards,
         'clean_duplicates': settings.clean_duplicates,
-        'preview_length': settings.preview_length,
+        'preview_length': settings.preview_length or 1500,
         'generated_files': [],
         'generation_complete': False,
         'last_result': None,
@@ -160,18 +189,7 @@ def init_session_state(config, settings: UserSettings):
         if key not in st.session_state:
             st.session_state[key] = value
 
-    if 'input_dir' not in st.session_state:
-        saved_dir = settings.input_dir or settings.last_input_dir
-        st.session_state['input_dir'] = saved_dir or config.materials_source
-
-    if 'selected_categories' not in st.session_state:
-        saved = settings.selected_categories
-        valid = [c for c in saved if c in config.categories]
-        st.session_state['selected_categories'] = (
-            valid if valid else config.categories[:3]
-        )
-
-    # Обработка отложенного удаления категорий
+    # ── Обработка отложенных операций с категориями ──
     cats_to_remove = st.session_state.pop('_categories_to_remove', [])
     if cats_to_remove:
         current = st.session_state.get('selected_categories', [])
@@ -179,7 +197,7 @@ def init_session_state(config, settings: UserSettings):
             c for c in current if c not in cats_to_remove
         ]
 
-    # Обработка отложенного переименования
+    # ── Обработка отложенного переименования ──
     rename_info = st.session_state.pop('_category_rename', None)
     if rename_info:
         old_name, new_name = rename_info
@@ -188,7 +206,7 @@ def init_session_state(config, settings: UserSettings):
             new_name if c == old_name else c for c in current
         ]
 
-    # Убираем категории, которых больше нет в конфиге
+    # ── Валидация: убираем несуществующие категории ──
     current = st.session_state.get('selected_categories', [])
     valid = [c for c in current if c in config.categories]
     if len(valid) != len(current):
