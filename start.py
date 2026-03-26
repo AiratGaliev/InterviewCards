@@ -125,6 +125,103 @@ def invalidate_caches():
     _cached_find_duplicates.clear()
 
 
+def _build_category_tree(
+        config_categories: list,
+        topic_categories: list,
+) -> tuple:
+    """Строит дерево из плоского списка категорий.
+
+    Input: ['java', 'java/epam', 'java/core', 'python']
+    Output:
+        top_levels = ['java', 'python']
+        sub_tree = {'java': ['core', 'epam'], 'python': []}
+    """
+    all_cats = set(config_categories) | set(topic_categories)
+
+    top_levels = set()
+    subs: dict = {}
+
+    for cat in all_cats:
+        parts = cat.split('/', 1)
+        top = parts[0]
+        top_levels.add(top)
+        if top not in subs:
+            subs[top] = set()
+        if len(parts) > 1:
+            subs[top].add(parts[1])
+
+    return (
+        sorted(top_levels),
+        {k: sorted(v) for k, v in subs.items()},
+    )
+
+
+def _compute_effective_categories(
+        selected_top: list,
+        selected_subs: dict,
+        sub_tree: dict,
+) -> list:
+    """Вычисляет плоский список категорий из иерархического выбора.
+
+    - Пустой selected_top → [] (= все темы)
+    - top без выбранных subs → [top] (= все подкатегории)
+    - top с выбранными subs → [top/sub1, top/sub2, ...]
+    """
+    if not selected_top:
+        return []
+
+    result = []
+    for top in selected_top:
+        chosen = selected_subs.get(top, [])
+        if not chosen:
+            result.append(top)
+        else:
+            for sub in chosen:
+                result.append(f"{top}/{sub}")
+    return result
+
+
+def _reverse_engineer_selection(
+        flat_categories: list,
+        sub_tree: dict,
+) -> tuple:
+    """Восстанавливает иерархический выбор из плоского списка.
+
+    Input: ['java/epam', 'python']
+    Output:
+        tops = ['java', 'python']
+        subs = {'java': ['epam']}
+
+    Input: ['java'] (java has subs 'epam','core')
+    Output:
+        tops = ['java']
+        subs = {}  ← пустой = все подкатегории java
+    """
+    if not flat_categories:
+        return [], {}
+
+    tops = set()
+    subs_map: dict = {}
+    top_only = set()
+
+    for cat in flat_categories:
+        parts = cat.split('/', 1)
+        top = parts[0]
+        tops.add(top)
+        if len(parts) > 1:
+            subs_map.setdefault(top, []).append(parts[1])
+        else:
+            top_only.add(top)
+
+    # top в top_only → все subs (пустой выбор в UI)
+    result_subs = {}
+    for top in tops:
+        if top not in top_only and top in subs_map:
+            result_subs[top] = subs_map[top]
+
+    return sorted(tops), result_subs
+
+
 def category_matches(
         topic_category: str,
         selected_categories: list,
@@ -162,18 +259,13 @@ def init_session_state(config, settings: UserSettings):
     # ── selected_categories: приоритет saved (даже если пустой) ──
     if 'selected_categories' not in st.session_state:
         if settings.selected_categories is not None:
-            # Фильтруем только те, что есть в config
-            valid = [
-                c for c in settings.selected_categories
-                if c in config.categories
-            ]
-            st.session_state['selected_categories'] = valid
+            st.session_state['selected_categories'] = (
+                list(settings.selected_categories)
+            )
         else:
-            # settings.selected_categories is None —
-            # файл настроек отсутствует или повреждён
             st.session_state['selected_categories'] = []
 
-    # ── Остальные настройки: saved > default ──
+    # ── Остальные настройки ──
     defaults = {
         'export_format': settings.export_format or 'both',
         'use_reverse_cards': settings.use_reverse_cards,
@@ -190,12 +282,15 @@ def init_session_state(config, settings: UserSettings):
             st.session_state[key] = value
 
     # ── Обработка отложенных операций с категориями ──
+    _needs_hierarchy_reset = False
+
     cats_to_remove = st.session_state.pop('_categories_to_remove', [])
     if cats_to_remove:
         current = st.session_state.get('selected_categories', [])
         st.session_state['selected_categories'] = [
             c for c in current if c not in cats_to_remove
         ]
+        _needs_hierarchy_reset = True
 
     # ── Обработка отложенного переименования ──
     rename_info = st.session_state.pop('_category_rename', None)
@@ -205,12 +300,15 @@ def init_session_state(config, settings: UserSettings):
         st.session_state['selected_categories'] = [
             new_name if c == old_name else c for c in current
         ]
+        _needs_hierarchy_reset = True
 
-    # ── Валидация: убираем несуществующие категории ──
-    current = st.session_state.get('selected_categories', [])
-    valid = [c for c in current if c in config.categories]
-    if len(valid) != len(current):
-        st.session_state['selected_categories'] = valid
+    # Сброс иерархического выбора при изменении категорий
+    if _needs_hierarchy_reset:
+        if 'selected_top_categories' in st.session_state:
+            del st.session_state['selected_top_categories']
+        for key in list(st.session_state.keys()):
+            if key.startswith('sub_categories_'):
+                del st.session_state[key]
 
 
 def collect_current_settings() -> UserSettings:
@@ -240,14 +338,23 @@ def reset_generation_state():
 
 def reset_all_settings():
     UserSettings().save()
-    invalidate_caches()
+    if 'invalidate_caches' in dir():
+        invalidate_caches()
+
     keys_to_clear = [
         'input_dir', 'selected_categories', 'export_format',
         'use_reverse_cards', 'clean_duplicates', 'preview_length',
         'generated_files', 'generation_complete', 'last_result',
         'search_query', 'new_category_input', 'renaming_category',
         'validation_reports', 'found_duplicates',
+        'selected_top_categories',
     ]
+
+    # Собираем все sub_categories_* ключи
+    for key in list(st.session_state.keys()):
+        if key.startswith('sub_categories_'):
+            keys_to_clear.append(key)
+
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
@@ -284,6 +391,97 @@ def count_data_lines(file_path: str) -> int:
             )
     except Exception:
         return 0
+
+
+def _render_category_selection(config, input_dir: str):
+    """Рендерит иерархический выбор категорий/подкатегорий."""
+
+    # Собираем категории из файлов + конфига
+    topic_categories = set()
+    if os.path.exists(input_dir):
+        topics = get_topics(input_dir)
+        for data in topics.values():
+            topic_categories.add(data.get('category', 'general'))
+
+    top_levels, sub_tree = _build_category_tree(
+        config.categories, list(topic_categories),
+    )
+
+    if not top_levels:
+        st.info("Нет доступных категорий")
+        st.session_state['selected_categories'] = []
+        return
+
+    # ── Инициализация из сохранённого плоского списка ──
+    if 'selected_top_categories' not in st.session_state:
+        saved = st.session_state.get('selected_categories', [])
+        init_top, init_subs = _reverse_engineer_selection(
+            saved, sub_tree,
+        )
+        st.session_state['selected_top_categories'] = [
+            t for t in init_top if t in top_levels
+        ]
+        for top, subs in init_subs.items():
+            available = sub_tree.get(top, [])
+            valid = [s for s in subs if s in available]
+            if valid:
+                st.session_state[f'sub_categories_{top}'] = valid
+
+    # ── Категории (верхний уровень) ──
+    st.multiselect(
+        "🏷️ Категории",
+        options=top_levels,
+        key="selected_top_categories",
+        help=(
+            "Пусто = все темы. "
+            "Выбор категории включает все её подкатегории."
+        ),
+    )
+
+    selected_top = st.session_state.get(
+        'selected_top_categories', [],
+    )
+
+    # ── Подкатегории (динамические поля) ──
+    selected_subs: dict = {}
+
+    for top in selected_top:
+        available = sub_tree.get(top, [])
+        if not available:
+            continue
+
+        st.multiselect(
+            f"📂 Подкатегории: {top}",
+            options=available,
+            key=f"sub_categories_{top}",
+            help=f"Пусто = все подкатегории «{top}»",
+        )
+        chosen = st.session_state.get(
+            f'sub_categories_{top}', [],
+        )
+        if chosen:
+            selected_subs[top] = chosen
+
+    # ── Очистка ключей для деселектнутых категорий ──
+    for key in list(st.session_state.keys()):
+        if key.startswith('sub_categories_'):
+            top = key[len('sub_categories_'):]
+            if top not in selected_top:
+                del st.session_state[key]
+
+    # ── Итоговый плоский список ──
+    effective = _compute_effective_categories(
+        selected_top, selected_subs, sub_tree,
+    )
+    st.session_state['selected_categories'] = effective
+
+    # ── Сводка ──
+    if effective:
+        st.caption(f"Фильтр: {', '.join(effective)}")
+    elif selected_top:
+        st.caption(
+            f"Фильтр: {', '.join(selected_top)} (все подкатегории)"
+        )
 
 
 def render_sidebar(config, generator: CardGenerator):
@@ -326,15 +524,7 @@ def render_sidebar(config, generator: CardGenerator):
         # ── Остаток функции без изменений ──
         st.divider()
 
-        st.multiselect(
-            "🏷️ Категории",
-            options=config.categories,
-            key="selected_categories",
-            help=(
-                "Фильтр по категориям материалов. "
-                "Новые категории добавляются на вкладке ⚙️ Настройки."
-            ),
-        )
+        _render_category_selection(config, input_dir)
 
         st.radio(
             "📤 Формат экспорта",
