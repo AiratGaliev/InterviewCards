@@ -7,9 +7,8 @@
 import configparser
 import os
 import platform
-import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 
 @dataclass
@@ -26,8 +25,6 @@ class AppConfig:
     _config: configparser.ConfigParser = field(default_factory=configparser.ConfigParser, repr=False)
 
     # Основные настройки
-    categories: List[str] = field(default_factory=list)
-    category_id: int = 0
     documents: str = ""
     output: str = ""
 
@@ -72,10 +69,6 @@ class AppConfig:
             return
 
         # Основные настройки
-        self.categories = self._parse_categories(
-            self._config.get('main', 'categories', fallback='general')
-        )
-        self.category_id = self._config.getint('main', 'category_id', fallback=0)
         self.documents = self._expand_path(
             self._config.get('main', 'documents', fallback='~/Documents/InterviewCards/')
         )
@@ -128,11 +121,6 @@ class AppConfig:
         self.cloze_end = self._config.get('cloze', 'end', fallback='==')
 
     @staticmethod
-    def _parse_categories(categories_str: str) -> List[str]:
-        """Парсит строку категорий в список"""
-        return [c.strip() for c in re.split(r'\s*,\s*', categories_str) if c.strip()]
-
-    @staticmethod
     def _expand_path(path: str) -> str:
         """Расширяет путь с учётом домашней директории"""
         if path.startswith('~'):
@@ -168,9 +156,6 @@ class AppConfig:
         """Проверяет корректность конфигурации"""
         if not self.obsidian_vault:
             print("❌ Не указан путь к Obsidian Vault")
-            return False
-        if not self.categories:
-            print("❌ Не указаны категории")
             return False
         return True
 
@@ -244,159 +229,6 @@ class AppConfig:
             'multi_line_basic': self.multi_line_basic_sep,
             'multi_line_bidirectional': self.multi_line_bidirectional_sep,
         }
-
-    def add_category(self, category: str) -> bool:
-        parts = category.strip().split('/')
-        normalized_parts = []
-        for part in parts:
-            part = part.strip().lower().replace(' ', '_')
-            part = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', part)
-            if part:
-                normalized_parts.append(part)
-
-        if not normalized_parts:
-            return False
-
-        category = '/'.join(normalized_parts)
-
-        if not category:
-            return False
-
-        if category in self.categories:
-            return False
-
-        self.categories.append(category)
-        self._save_categories()
-        return True
-
-    def remove_category(self, category: str) -> bool:
-        """Удаляет категорию из списка и сохраняет в config.ini."""
-        if category not in self.categories:
-            return False
-
-        self.categories.remove(category)
-        self._save_categories()
-        return True
-
-    def rename_category(self, old_name: str, new_name: str) -> bool:
-        parts = new_name.strip().split('/')
-        normalized_parts = []
-        for part in parts:
-            part = part.strip().lower().replace(' ', '_')
-            part = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', part)
-            if part:
-                normalized_parts.append(part)
-
-        if not normalized_parts:
-            return False
-
-        new_name = '/'.join(normalized_parts)
-
-        if old_name not in self.categories:
-            return False
-        if new_name in self.categories:
-            return False
-
-        idx = self.categories.index(old_name)
-        self.categories[idx] = new_name
-        self._save_categories()
-        return True
-
-    def _save_categories(self) -> None:
-        """Сохраняет текущий список категорий в config.ini,
-        не затрагивая остальное содержимое файла."""
-        categories_str = ', '.join(self.categories)
-
-        try:
-            # Читаем файл как текст
-            if os.path.exists(self._config_path):
-                with open(self._config_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-            else:
-                lines = []
-
-            # Ищем строку categories в секции [main]
-            in_main_section = False
-            found = False
-
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-
-                # Отслеживаем секции
-                if stripped.startswith('['):
-                    in_main_section = stripped.lower() == '[main]'
-                    continue
-
-                # Ищем ключ categories в секции [main]
-                if in_main_section and stripped.startswith('categories'):
-                    # Проверяем что это именно ключ, а не комментарий
-                    if '=' in stripped:
-                        key_part = stripped.split('=', 1)[0].strip()
-                        if key_part == 'categories':
-                            lines[i] = f'categories = {categories_str}\n'
-                            found = True
-                            break
-
-            # Если строка не найдена — добавляем
-            if not found:
-                # Ищем секцию [main]
-                main_section_idx = None
-                for i, line in enumerate(lines):
-                    if line.strip().lower() == '[main]':
-                        main_section_idx = i
-                        break
-
-                if main_section_idx is not None:
-                    # Вставляем после заголовка секции
-                    insert_idx = main_section_idx + 1
-                    lines.insert(insert_idx, f'categories = {categories_str}\n')
-                else:
-                    # Секции [main] нет — добавляем в конец
-                    if lines and not lines[-1].endswith('\n'):
-                        lines.append('\n')
-                    lines.append('\n[main]\n')
-                    lines.append(f'categories = {categories_str}\n')
-
-            # Записываем обратно
-            with open(self._config_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
-
-        except Exception as e:
-            print(f"❌ Ошибка сохранения config.ini: {e}")
-
-    def validate_category_name(self, name: str) -> tuple:
-        """Валидирует имя категории.
-
-        Returns:
-            (is_valid: bool, normalized_name: str, error_message: str)
-        """
-        if not name or not name.strip():
-            return False, '', 'Имя категории не может быть пустым'
-
-        parts = name.strip().split('/')
-        normalized_parts = []
-
-        for part in parts:
-            part = part.strip().lower().replace(' ', '_')
-            part = re.sub(r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', part)
-            if part:
-                normalized_parts.append(part)
-
-        if not normalized_parts:
-            return False, '', 'Имя содержит только недопустимые символы'
-
-        normalized = '/'.join(normalized_parts)
-
-        if len(normalized) < 2:
-            return False, normalized, 'Минимум 2 символа'
-
-        if len(normalized) > 80:
-            return False, normalized, 'Максимум 80 символов'
-
-        if normalized in self.categories:
-            return False, normalized, f'Категория "{normalized}" уже существует'
-
-        return True, normalized, ''
 
 
 # Глобальный экземпляр конфигурации (singleton pattern)

@@ -123,10 +123,9 @@ class UserSettings:
             UserSettings: Настройки с валидированными значениями
         """
         # Валидация категорий — оставляем только существующие
-        if self.selected_categories and config.categories:
+        if self.selected_categories:
             self.selected_categories = [
                 c for c in self.selected_categories
-                if c in config.categories
             ]
 
         # Путь по умолчанию из конфига

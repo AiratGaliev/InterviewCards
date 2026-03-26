@@ -1,6 +1,5 @@
 import io
 import os
-import re
 import traceback
 import zipfile
 from pathlib import Path
@@ -125,23 +124,18 @@ def invalidate_caches():
     _cached_find_duplicates.clear()
 
 
-def _build_category_tree(
-        config_categories: list,
-        topic_categories: list,
-) -> tuple:
+def _build_category_tree(topic_categories: list) -> tuple:
     """Строит дерево из плоского списка категорий.
 
-    Input: ['java', 'java/epam', 'java/core', 'python']
+    Input: ['java', 'java/core', 'python']
     Output:
         top_levels = ['java', 'python']
-        sub_tree = {'java': ['core', 'epam'], 'python': []}
+        sub_tree = {'java': ['core'], 'python': []}
     """
-    all_cats = set(config_categories) | set(topic_categories)
-
     top_levels = set()
     subs: dict = {}
 
-    for cat in all_cats:
+    for cat in topic_categories:
         parts = cat.split('/', 1)
         top = parts[0]
         top_levels.add(top)
@@ -281,35 +275,6 @@ def init_session_state(config, settings: UserSettings):
         if key not in st.session_state:
             st.session_state[key] = value
 
-    # ── Обработка отложенных операций с категориями ──
-    _needs_hierarchy_reset = False
-
-    cats_to_remove = st.session_state.pop('_categories_to_remove', [])
-    if cats_to_remove:
-        current = st.session_state.get('selected_categories', [])
-        st.session_state['selected_categories'] = [
-            c for c in current if c not in cats_to_remove
-        ]
-        _needs_hierarchy_reset = True
-
-    # ── Обработка отложенного переименования ──
-    rename_info = st.session_state.pop('_category_rename', None)
-    if rename_info:
-        old_name, new_name = rename_info
-        current = st.session_state.get('selected_categories', [])
-        st.session_state['selected_categories'] = [
-            new_name if c == old_name else c for c in current
-        ]
-        _needs_hierarchy_reset = True
-
-    # Сброс иерархического выбора при изменении категорий
-    if _needs_hierarchy_reset:
-        if 'selected_top_categories' in st.session_state:
-            del st.session_state['selected_top_categories']
-        for key in list(st.session_state.keys()):
-            if key.startswith('sub_categories_'):
-                del st.session_state[key]
-
 
 def collect_current_settings() -> UserSettings:
     return UserSettings(
@@ -393,22 +358,20 @@ def count_data_lines(file_path: str) -> int:
         return 0
 
 
-def _render_category_selection(config, input_dir: str):
+def _render_category_selection(input_dir: str):
     """Рендерит иерархический выбор категорий/подкатегорий."""
 
-    # Собираем категории из файлов + конфига
-    topic_categories = set()
+    # Собираем категории только из файлов
+    topic_categories: set = set()
     if os.path.exists(input_dir):
         topics = get_topics(input_dir)
         for data in topics.values():
             topic_categories.add(data.get('category', 'general'))
 
-    top_levels, sub_tree = _build_category_tree(
-        config.categories, list(topic_categories),
-    )
+    top_levels, sub_tree = _build_category_tree(list(topic_categories))
 
     if not top_levels:
-        st.info("Нет доступных категорий")
+        st.info("Нет доступных категорий в материалах")
         st.session_state['selected_categories'] = []
         return
 
@@ -524,7 +487,7 @@ def render_sidebar(config, generator: CardGenerator):
         # ── Остаток функции без изменений ──
         st.divider()
 
-        _render_category_selection(config, input_dir)
+        _render_category_selection(input_dir)
 
         st.radio(
             "📤 Формат экспорта",
@@ -1330,7 +1293,7 @@ def render_tab_statistics():
     )
 
 
-def render_tab_generation(config, generator: CardGenerator):
+def render_tab_generation(generator: CardGenerator):
     input_dir = st.session_state['input_dir']
     categories = st.session_state.get('selected_categories', [])
     export_fmt = st.session_state.get('export_format', 'both')
@@ -1793,12 +1756,6 @@ def render_tab_settings(config):
             "`config.ini` и перезапустите приложение."
         )
 
-    # ──────────────────────────────────────
-    #  Управление категориями
-    # ──────────────────────────────────────
-    with st.expander("🏷️ Управление категориями", expanded=True):
-        _render_category_manager(config)
-
     with st.expander("📏 Лимиты", expanded=False):
         col1, col2, col3 = st.columns(3)
         col1.metric(
@@ -1903,190 +1860,6 @@ def render_tab_settings(config):
         st.caption(f"Конфигурация: `{config._config_path}`")
 
 
-def _render_category_manager(config):
-    """Виджет управления категориями."""
-
-    # Текущие категории
-    if config.categories:
-        st.markdown("**Текущие категории:**")
-
-        categories_to_remove = []
-
-        for i, cat in enumerate(config.categories):
-            col_name, col_rename, col_del = st.columns([3, 1, 1])
-
-            with col_name:
-                cat_path = config.get_materials_path(cat)
-                exists = os.path.exists(cat_path)
-                icon = "📁" if exists else "📂"
-                st.markdown(f"{icon} `{cat}`")
-
-            with col_rename:
-                if st.button(
-                        "✏️",
-                        key=f"rename_cat_{i}",
-                        help=f"Переименовать '{cat}'",
-                ):
-                    st.session_state['renaming_category'] = cat
-
-            with col_del:
-                if st.button(
-                        "🗑️",
-                        key=f"del_cat_{i}",
-                        help=f"Удалить '{cat}'",
-                ):
-                    categories_to_remove.append(cat)
-
-        for cat in categories_to_remove:
-            if config.remove_category(cat):
-                # Помечаем категорию для удаления из фильтра
-                # (будет применено при следующем рендере)
-                st.session_state['_categories_to_remove'] = (
-                        st.session_state.get('_categories_to_remove', []) + [cat]
-                )
-                st.toast(f"🗑️ Категория '{cat}' удалена")
-                st.rerun()
-    else:
-        st.info("Нет категорий. Добавьте первую категорию ниже.")
-
-    # Переименование
-    renaming = st.session_state.get('renaming_category', None)
-    if renaming:
-        st.markdown(f"**Переименовать `{renaming}`:**")
-        col_input, col_ok, col_cancel = st.columns([3, 1, 1])
-
-        with col_input:
-            new_name = st.text_input(
-                "Новое имя",
-                value=renaming,
-                key="rename_input",
-                label_visibility="collapsed",
-            )
-
-        with col_ok:
-            if st.button("✅", key="rename_ok", help="Применить"):
-                if config.rename_category(renaming, new_name):
-                    # Нормализация с поддержкой /
-                    parts = new_name.strip().split('/')
-                    norm_parts = []
-                    for part in parts:
-                        p = part.strip().lower().replace(' ', '_')
-                        p = re.sub(
-                            r'[^a-zA-Z0-9_а-яА-ЯёЁ-]', '', p
-                        )
-                        if p:
-                            norm_parts.append(p)
-                    normalized = '/'.join(norm_parts)
-                    # Помечаем переименование для применения
-                    st.session_state['_category_rename'] = (renaming, normalized)
-                    st.session_state['renaming_category'] = None
-                    st.toast(f"✅ Переименовано: {renaming} → {new_name}")
-                    st.rerun()
-                else:
-                    st.error("Не удалось переименовать")
-
-        with col_cancel:
-            if st.button("❌", key="rename_cancel", help="Отмена"):
-                st.session_state['renaming_category'] = None
-                st.rerun()
-
-    st.divider()
-
-    # ──────────────────────────────────────
-    #  Добавление новой категории
-    # ──────────────────────────────────────
-    st.markdown("**Добавить категорию:**")
-
-    # Флаг для очистки поля после успешного добавления
-    if st.session_state.get('_clear_new_category', False):
-        st.session_state['_clear_new_category'] = False
-        default_value = ""
-    else:
-        default_value = st.session_state.get('_new_category_value', '')
-
-    col_input, col_add = st.columns([4, 1])
-
-    with col_input:
-        new_category = st.text_input(
-            "Имя новой категории",
-            value=default_value,
-            key="new_category_input",
-            placeholder="например: python, java, system_design...",
-            label_visibility="collapsed",
-        )
-
-    # Сохраняем введённое значение
-    st.session_state['_new_category_value'] = new_category
-
-    # Валидация в реальном времени
-    if new_category and new_category.strip():
-        is_valid, normalized, error_msg = config.validate_category_name(
-            new_category
-        )
-
-        if normalized and normalized != new_category.strip():
-            st.caption(f"Будет сохранено как: `{normalized}`")
-
-        if not is_valid:
-            st.caption(f"⚠️ {error_msg}")
-
-    with col_add:
-        add_clicked = st.button(
-            "➕",
-            key="add_category_btn",
-            help="Добавить категорию",
-            use_container_width=True,
-        )
-
-    if add_clicked and new_category and new_category.strip():
-        is_valid, normalized, error_msg = config.validate_category_name(
-            new_category
-        )
-
-        if is_valid:
-            if config.add_category(normalized):
-                st.toast(f"✅ Категория '{normalized}' добавлена!")
-
-                st.session_state['_clear_new_category'] = True
-                st.session_state['_new_category_value'] = ''
-
-                st.rerun()
-            else:
-                st.error("Не удалось добавить категорию")
-        else:
-            st.error(f"❌ {error_msg}")
-
-    # Подсказки
-    with st.popover("💡 Правила именования"):
-        st.markdown("""
-        **Допустимые символы:**
-        - Латинские буквы: `a-z`
-        - Кириллица: `а-я`
-        - Цифры: `0-9`
-        - Подчёркивание: `_`
-        - Дефис: `-`
-        - Слэш: `/` (разделитель подкатегорий)
-
-        **Примеры:**
-        - `python` — категория
-        - `java/core` — категория/подкатегория
-        - `system_design` — категория
-        - `java/core/advanced` — многоуровневая
-
-        **Как работает иерархия:**
-        - Выбор `java` включает `java`, `java/core`, `java/core`
-        - Выбор `java/core` включает только `java/core`
-        - Файлы размещаются в `Materials/java/core/`
-        - Anki колода: `Interview::Java::Core`
-        - Obsidian тег: `#flashcards/java/core`
-
-        **Автоматически:**
-        - Пробелы → `_`
-        - Приведение к нижнему регистру
-        - Удаление спецсимволов
-        """)
-
-
 def main():
     st.set_page_config(
         page_title="Interview Cards",
@@ -2141,7 +1914,7 @@ def main():
         render_tab_statistics()
 
     with tab_gen:
-        render_tab_generation(config, generator)
+        render_tab_generation(generator)
 
     with tab_files:
         render_tab_files(generator)

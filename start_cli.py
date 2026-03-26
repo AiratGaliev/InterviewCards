@@ -79,9 +79,8 @@ def get_user_input(config) -> tuple:
         input_dir = default_path
 
     # Категории
-    print(f"\nДоступные категории: {', '.join(config.categories)}")
     categories_input = input(
-        "Выберите категории (через запятую, или 'all'): "
+        "Задайте категории (через запятую, или 'all'): "
     ).strip()
 
     if categories_input.lower() == 'all' or not categories_input:

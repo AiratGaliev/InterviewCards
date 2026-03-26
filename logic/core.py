@@ -269,8 +269,9 @@ class CardGenerator:
             return result
 
         # Подготовка категорий
-        if selected_categories is None:
-            selected_categories = self.config.categories
+        # selected_categories=None → обработать все темы
+        # selected_categories=[] → тоже все темы
+        # selected_categories=['java'] → только java и java/*
 
         all_cards: List[InterviewCard] = []
         card_id = 1
