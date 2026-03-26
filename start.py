@@ -12,10 +12,9 @@ from logic.core import CardGenerator, GenerationResult
 from logic.utils import (
     load_markdown_topics,
     parse_cards_from_markdown,
-    validate_all_files,
     generate_validation_report_text,
     search_cards,
-    compute_deck_statistics,
+    validate_file_formats,
 )
 from models.InterviewCard import CardType
 from ui.settings import UserSettings
@@ -90,11 +89,6 @@ def _cached_parse_cards(file_path: str, file_mtime: float) -> list:
     return parse_cards_from_markdown(file_path)
 
 
-@st.cache_data(ttl=300, show_spinner="Подсчёт статистики...")
-def _cached_statistics(input_dir: str, dir_mtime: float) -> dict:
-    return compute_deck_statistics(input_dir)
-
-
 @st.cache_data(ttl=120, show_spinner=False)
 def _cached_find_duplicates(input_dir: str, dir_mtime: float) -> list:
     return find_all_duplicates(input_dir)
@@ -120,8 +114,109 @@ def invalidate_caches():
     """Сброс всех кэшей (после генерации или изменения файлов)."""
     _cached_load_topics.clear()
     _cached_parse_cards.clear()
-    _cached_statistics.clear()
     _cached_find_duplicates.clear()
+
+
+def _get_filtered_topics(input_dir: str) -> dict:
+    """Темы, отфильтрованные по текущему выбору категорий."""
+    topics = get_topics(input_dir)
+    categories = st.session_state.get('selected_categories', [])
+    if not categories:
+        return topics
+    return {
+        name: data for name, data in topics.items()
+        if category_matches(
+            data.get('category', 'general'), categories,
+        )
+    }
+
+
+def _compute_stats_from_topics(topics: dict) -> dict:
+    """Статистика из заданного (уже отфильтрованного) набора тем."""
+    stats = {
+        'total_files': len(topics),
+        'total_cards': 0,
+        'by_deck': {},
+        'by_category': {},
+        'by_type': {},
+        'by_file': {},
+        'cloze_count': 0,
+        'code_count': 0,
+        'reverse_count': 0,
+        'avg_question_length': 0,
+        'avg_answer_length': 0,
+        'longest_question': ('', 0),
+        'longest_answer': ('', 0),
+    }
+
+    all_q_lengths: list = []
+    all_a_lengths: list = []
+
+    for topic_name, topic_data in topics.items():
+        cards = get_cards(topic_data['path'])
+        deck_name = topic_data.get('deck_name', 'flashcards')
+        cat = topic_data.get('category', 'general')
+
+        stats['total_cards'] += len(cards)
+        stats['by_deck'][deck_name] = (
+                stats['by_deck'].get(deck_name, 0) + len(cards)
+        )
+        stats['by_category'][cat] = (
+                stats['by_category'].get(cat, 0) + len(cards)
+        )
+
+        type_counts: dict = {}
+        for card in cards:
+            tn = card.card_type.value
+            stats['by_type'][tn] = stats['by_type'].get(tn, 0) + 1
+            type_counts[tn] = type_counts.get(tn, 0) + 1
+
+            if card.card_type == CardType.CLOZE:
+                stats['cloze_count'] += 1
+            if card.has_code():
+                stats['code_count'] += 1
+            if card.is_reverse:
+                stats['reverse_count'] += 1
+
+            all_q_lengths.append(len(card.question))
+            all_a_lengths.append(len(card.answer))
+
+            if len(card.question) > stats['longest_question'][1]:
+                stats['longest_question'] = (
+                    card.question[:80], len(card.question),
+                )
+            if len(card.answer) > stats['longest_answer'][1]:
+                stats['longest_answer'] = (
+                    card.answer[:80], len(card.answer),
+                )
+
+        stats['by_file'][topic_name] = {
+            'cards': len(cards),
+            'types': type_counts,
+            'category': cat,
+            'deck': deck_name,
+        }
+
+    if all_q_lengths:
+        stats['avg_question_length'] = (
+                sum(all_q_lengths) / len(all_q_lengths)
+        )
+    if all_a_lengths:
+        stats['avg_answer_length'] = (
+                sum(all_a_lengths) / len(all_a_lengths)
+        )
+
+    return stats
+
+
+def _render_active_filter_info():
+    """Показывает индикатор активного фильтра категорий."""
+    categories = st.session_state.get('selected_categories', [])
+    if categories:
+        st.info(
+            f"🏷️ Фильтр: **{', '.join(categories)}** "
+            f"(изменить в боковой панели)"
+        )
 
 
 def _build_category_tree(topic_categories: list) -> tuple:
@@ -181,12 +276,12 @@ def _reverse_engineer_selection(
 ) -> tuple:
     """Восстанавливает иерархический выбор из плоского списка.
 
-    Input: ['java/epam', 'python']
+    Input: ['java/core', 'python']
     Output:
         tops = ['java', 'python']
-        subs = {'java': ['epam']}
+        subs = {'java': ['core']}
 
-    Input: ['java'] (java has subs 'epam','core')
+    Input: ['java'] (java has subs 'core','core')
     Output:
         tops = ['java']
         subs = {}  ← пустой = все подкатегории java
@@ -905,8 +1000,8 @@ def render_tab_topics(generator: CardGenerator):
 
 
 def render_tab_validation():
-    """Вкладка валидации материалов."""
     input_dir = st.session_state.get('input_dir', '')
+    categories = st.session_state.get('selected_categories', [])
 
     st.markdown("### 🔍 Валидация материалов")
     st.caption(
@@ -915,12 +1010,23 @@ def render_tab_validation():
     )
 
     if not os.path.exists(input_dir):
-        st.info("📁 Укажите путь к папке с материалами в боковой панели")
+        st.info(
+            "📁 Укажите путь к папке с материалами "
+            "в боковой панели"
+        )
         return
+
+    _render_active_filter_info()
 
     if st.button("🔍 Запустить валидацию", type="primary", use_container_width=True):
         with st.spinner("Проверка файлов..."):
-            reports = validate_all_files(input_dir)
+            # Валидируем только отфильтрованные файлы
+            filtered = _get_filtered_topics(input_dir)
+            reports = []
+            for name in sorted(filtered):
+                data = filtered[name]
+                report = validate_file_formats(data['path'])
+                reports.append(report)
             st.session_state['validation_reports'] = reports
 
     reports = st.session_state.get('validation_reports', None)
@@ -932,7 +1038,7 @@ def render_tab_validation():
         st.warning("Нет файлов для валидации")
         return
 
-    # --- Сводка ---
+    # ── Метрики ──
     total_errors = sum(r.error_count for r in reports)
     total_warnings = sum(r.warning_count for r in reports)
     total_info = sum(r.info_count for r in reports)
@@ -973,7 +1079,7 @@ def render_tab_validation():
 
     st.divider()
 
-    # --- Фильтр отображения ---
+    # ── Фильтр отображения ──
     show_filter = st.radio(
         "Показать",
         ["Все файлы", "Только с проблемами", "Только со смешением форматов"],
@@ -990,86 +1096,77 @@ def render_tab_validation():
 
     if not display_reports:
         st.info("Нет файлов, соответствующих фильтру")
-        return
-
-    # --- Детали по каждому файлу ---
-    for report in display_reports:
-        # Иконка статуса
-        if report.error_count > 0:
-            status_icon = "❌"
-        elif report.has_mixed_formats:
-            status_icon = "🔀"
-        elif report.warning_count > 0:
-            status_icon = "⚠️"
-        else:
-            status_icon = "✅"
-
-        issue_summary = []
-        if report.error_count:
-            issue_summary.append(f"{report.error_count} ош.")
-        if report.warning_count:
-            issue_summary.append(f"{report.warning_count} пред.")
-        if report.info_count:
-            issue_summary.append(f"{report.info_count} инфо")
-        summary_str = f" ({', '.join(issue_summary)})" if issue_summary else ""
-
-        with st.expander(
-                f"{status_icon} **{report.topic_name}** — "
-                f"{report.total_cards_found} карточек{summary_str}",
-                expanded=(report.error_count > 0 or report.has_mixed_formats),
-        ):
-            # Обнаруженные форматы
-            if report.detected_formats:
-                st.markdown("**Обнаруженные форматы:**")
-                format_labels = {
-                    'single_line_basic': '🟢 Basic (::)',
-                    'single_line_bidirectional': '🔵 Bidirectional (:::)',
-                    'multi_line_basic_sep': '🟡 Multi-line (?)',
-                    'multi_line_bidirectional_sep': '🟣 Multi-line (??)',
-                    'cloze': '🟠 Cloze (==…==)',
-                    'legacy_question': '📋 Legacy (### Вопрос:)',
-                }
-                for fmt, line_nums in report.detected_formats.items():
-                    label = format_labels.get(fmt, fmt)
-                    lines_preview = ", ".join(str(ln) for ln in line_nums[:8])
-                    extra = f" ...+{len(line_nums) - 8}" if len(line_nums) > 8 else ""
-                    st.caption(f"  {label} — строки: {lines_preview}{extra}")
-
-            if report.has_mixed_formats:
-                st.warning("🔀 **Смешение форматов обнаружено!**")
-
-            # Проблемы
-            if report.issues:
-                st.markdown("**Проблемы:**")
-                for issue in report.issues:
-                    icon = SEVERITY_EMOJI.get(issue.severity, '•')
-
-                    # Цветовое оформление по severity
-                    if issue.severity == 'error':
-                        st.error(
-                            f"{icon} **Строка {issue.line_number}:** {issue.message}"
-                        )
-                    elif issue.severity == 'warning':
-                        st.warning(
-                            f"{icon} **Строка {issue.line_number}:** {issue.message}"
-                        )
-                    else:
-                        st.info(
-                            f"{icon} **Строка {issue.line_number}:** {issue.message}"
-                        )
-
-                    # Показать проблемную строку
-                    if issue.line_text:
-                        display_text = issue.line_text[:150]
-                        if len(issue.line_text) > 150:
-                            display_text += "…"
-                        st.code(display_text, language="markdown")
-
-                    # Совет
-                    if issue.suggestion:
-                        st.caption(f"💡 {issue.suggestion}")
+    else:
+        for report in display_reports:
+            if report.error_count > 0:
+                status_icon = "❌"
+            elif report.has_mixed_formats:
+                status_icon = "🔀"
+            elif report.warning_count > 0:
+                status_icon = "⚠️"
             else:
-                st.success("✅ Проблем не обнаружено")
+                status_icon = "✅"
+
+            issue_summary = []
+            if report.error_count:
+                issue_summary.append(f"{report.error_count} ош.")
+            if report.warning_count:
+                issue_summary.append(f"{report.warning_count} пред.")
+            if report.info_count:
+                issue_summary.append(f"{report.info_count} инфо")
+            summary_str = f" ({', '.join(issue_summary)})" if issue_summary else ""
+
+            with st.expander(
+                    f"{status_icon} **{report.topic_name}** — "
+                    f"{report.total_cards_found} карточек{summary_str}",
+                    expanded=(report.error_count > 0 or report.has_mixed_formats),
+            ):
+                if report.detected_formats:
+                    st.markdown("**Обнаруженные форматы:**")
+                    format_labels = {
+                        'single_line_basic': '🟢 Basic (::)',
+                        'single_line_bidirectional': '🔵 Bidirectional (:::)',
+                        'multi_line_basic_sep': '🟡 Multi-line (?)',
+                        'multi_line_bidirectional_sep': '🟣 Multi-line (??)',
+                        'cloze': '🟠 Cloze (==…==)',
+                        'legacy_question': '📋 Legacy (### Вопрос:)',
+                    }
+                    for fmt, line_nums in report.detected_formats.items():
+                        label = format_labels.get(fmt, fmt)
+                        lines_preview = ", ".join(str(ln) for ln in line_nums[:8])
+                        extra = f" ...+{len(line_nums) - 8}" if len(line_nums) > 8 else ""
+                        st.caption(f"  {label} — строки: {lines_preview}{extra}")
+
+                if report.has_mixed_formats:
+                    st.warning("🔀 **Смешение форматов обнаружено!**")
+
+                if report.issues:
+                    st.markdown("**Проблемы:**")
+                    for issue in report.issues:
+                        icon = SEVERITY_EMOJI.get(issue.severity, '•')
+                        if issue.severity == 'error':
+                            st.error(
+                                f"{icon} **Строка {issue.line_number}:** {issue.message}"
+                            )
+                        elif issue.severity == 'warning':
+                            st.warning(
+                                f"{icon} **Строка {issue.line_number}:** {issue.message}"
+                            )
+                        else:
+                            st.info(
+                                f"{icon} **Строка {issue.line_number}:** {issue.message}"
+                            )
+
+                        if issue.line_text:
+                            display_text = issue.line_text[:150]
+                            if len(issue.line_text) > 150:
+                                display_text += "…"
+                            st.code(display_text, language="markdown")
+
+                        if issue.suggestion:
+                            st.caption(f"💡 {issue.suggestion}")
+                else:
+                    st.success("✅ Проблем не обнаружено")
 
     # ── Кросс-файловые дубликаты ──
     st.divider()
@@ -1084,17 +1181,29 @@ def render_tab_validation():
             use_container_width=True,
             key="find_duplicates_btn",
     ):
-        dir_mtime = _get_dir_mtime(input_dir)
-        duplicates = _cached_find_duplicates(input_dir, dir_mtime)
-        st.session_state['found_duplicates'] = duplicates
+        with st.spinner("Поиск дубликатов..."):
+            # Ищем среди всех файлов, фильтруем результат
+            dir_mtime = _get_dir_mtime(input_dir)
+            all_duplicates = _cached_find_duplicates(input_dir, dir_mtime)
+
+            # Фильтруем по выбранным категориям
+            if categories:
+                filtered = _get_filtered_topics(input_dir)
+                valid_topics = set(filtered.keys())
+                duplicates = [
+                    d for d in all_duplicates
+                    if (d.duplicate_topic in valid_topics
+                        or d.original_topic in valid_topics)
+                ]
+            else:
+                duplicates = all_duplicates
+
+            st.session_state['found_duplicates'] = duplicates
 
     duplicates = st.session_state.get('found_duplicates', None)
 
     if duplicates is None:
-        st.info(
-            "Нажмите кнопку выше для поиска дубликатов "
-            "между файлами"
-        )
+        st.info("Нажмите кнопку выше для поиска дубликатов")
     elif not duplicates:
         st.success("✅ Дубликатов не найдено!")
     else:
@@ -1160,9 +1269,7 @@ def render_tab_validation():
                             'multi_line_bidirectional': 'Multi-line (??)',
                             'cloze': 'Cloze (==…==)',
                         }
-                        label = type_labels.get(
-                            dup.card_type, dup.card_type
-                        )
+                        label = type_labels.get(dup.card_type, dup.card_type)
                         st.caption(f"Тип: {label}")
 
         if same_file:
@@ -1174,10 +1281,7 @@ def render_tab_validation():
             for dup in same_file:
                 q_short = dup.question_preview[:60]
                 ellipsis = "…" if len(dup.question_preview) > 60 else ""
-                st.warning(
-                    f"🔄 **{dup.duplicate_topic}**: "
-                    f"'{q_short}{ellipsis}'"
-                )
+                st.warning(f"🔄 **{dup.duplicate_topic}**: '{q_short}{ellipsis}'")
 
 
 def render_tab_statistics():
@@ -1189,15 +1293,16 @@ def render_tab_statistics():
         st.info("📁 Укажите путь к папке с материалами")
         return
 
-    # ── Кэшированная статистика ──
-    dir_mtime = _get_dir_mtime(input_dir)
-    stats = _cached_statistics(input_dir, dir_mtime)
+    _render_active_filter_info()
+
+    # Статистика из отфильтрованных тем (парсинг закэширован)
+    filtered = _get_filtered_topics(input_dir)
+    stats = _compute_stats_from_topics(filtered)
 
     if stats['total_files'] == 0:
         st.warning("Нет файлов для анализа")
         return
 
-    # ── Остальной код без изменений ──
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📄 Файлов", stats['total_files'])
     col2.metric("📝 Карточек", stats['total_cards'])
@@ -1278,9 +1383,7 @@ def render_tab_statistics():
                     "Карточек": info['cards'],
                     "Типы": types_str,
                 })
-            st.dataframe(
-                file_data, use_container_width=True, hide_index=True
-            )
+            st.dataframe(file_data, use_container_width=True, hide_index=True)
 
     st.markdown("#### 🏆 Рекорды")
     q_text, q_len = stats['longest_question']
@@ -1317,6 +1420,7 @@ def render_tab_generation(generator: CardGenerator):
         else:
             filtered_count = topics_count
 
+    _render_active_filter_info()
     st.markdown("### 📋 Параметры генерации")
 
     col1, col2, col3, col4 = st.columns(4)

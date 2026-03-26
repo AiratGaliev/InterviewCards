@@ -290,10 +290,6 @@ class CardGenerator:
                     and not _category_matches(
                         topic_category, selected_categories
                     )):
-                result.warnings.append(
-                    f"Категория '{topic_category}' "
-                    f"не выбрана: {topic_name}"
-                )
                 continue
 
             # Парсинг карточек
