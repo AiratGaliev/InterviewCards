@@ -52,7 +52,7 @@
    Примеры:
    — Java:       docs.oracle.com/en/java/javase/25/index.html, docs.oracle.com/en/java/javase/25/docs/api/index.html,
    docs.oracle.com/javase/specs/jls/se25/html/index.html, docs.oracle.com/javase/specs/jvms/se25/html/index.html,
-   openjdk.org/jeps
+   openjdk.org/jeps, openjdk.org/projects/jdk/25/
    — JavaScript: tc39.es/ecma262, developer.mozilla.org
    — TypeScript: typescriptlang.org/docs
    — Python:     docs.python.org
