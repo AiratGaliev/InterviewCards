@@ -3015,7 +3015,7 @@ def _convert_markdown_table_to_html(table_text: str) -> str:
 
     parts.append('<tbody>')
     for ri, row in enumerate(rows[1:]):
-        bg = '#272822' if ri % 2 == 0 else '#43453b'
+        bg = '#3b4247' if ri % 2 == 0 else '#43453b'
         parts.append(f'<tr style="background:{bg};">')
         for j, cell in enumerate(row):
             align = alignments[j] if j < len(alignments) else 'left'
@@ -3231,6 +3231,18 @@ def format_markdown_to_anki_html(text: str) -> str:
     # --- Restore markdown tables as styled HTML ---
     for idx, table_text in enumerate(_anki_table_blocks):
         html_table = _convert_markdown_table_to_html(table_text)
+        # Also restore inline code placeholders inside table cells
+        for ic_idx, code_text in enumerate(inline_codes):
+            escaped = escape_html(code_text)
+            styled = (
+                f'<code style="background:#272822;padding:2px 6px;'
+                f'border-radius:4px;'
+                f'font-family:Consolas,monospace;'
+                f'font-size:0.9em;">{escaped}</code>'
+            )
+            html_table = html_table.replace(
+                f"\x00IC{ic_idx}\x00", styled
+            )
         result = result.replace(f"\x00TB{idx}\x00", html_table)
 
     return result
