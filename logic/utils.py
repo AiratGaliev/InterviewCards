@@ -22,8 +22,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 from pygments import highlight as pygments_highlight
-from pygments.formatters import HtmlFormatter
-from pygments.lexers import get_lexer_by_name, TextLexer
+from pygments.formatters.html import HtmlFormatter
+from pygments.lexers import get_lexer_by_name
+from pygments.lexers.text import TexLexer
 
 from models.InterviewCard import (
     InterviewCard, CardType, ClozeDeletion, SchedulingData
@@ -2887,7 +2888,7 @@ def format_code_for_anki(code: str, language: str = 'text') -> str:
     try:
         lexer = get_lexer_by_name(language, stripall=True)
     except Exception:
-        lexer = TextLexer(stripall=True)
+        lexer = TexLexer(stripall=True)
 
     formatter = HtmlFormatter(
         noclasses=True,
@@ -2936,6 +2937,137 @@ def format_code_for_anki(code: str, language: str = 'text') -> str:
     return result
 
 
+def _convert_markdown_table_to_html(table_text: str) -> str:
+    """Convert a markdown table to a styled HTML table for Anki."""
+    lines = table_text.strip().split('\n')
+    if len(lines) < 2:
+        return table_text
+
+    rows = []
+    alignments = []
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith('|'):
+            continue
+
+        raw = stripped
+        if raw.startswith('|'):
+            raw = raw[1:]
+        if raw.endswith('|'):
+            raw = raw[:-1]
+
+        cells = [cell.strip() for cell in raw.split('|')]
+
+        is_separator = all(
+            re.match(r'^:?-+:?$', cell.strip()) for cell in cells
+            if cell.strip()
+        )
+
+        if is_separator and i >= 1:
+            for cell in cells:
+                cell_stripped = cell.strip()
+                if not cell_stripped:
+                    continue
+                if (cell_stripped.startswith(':')
+                        and cell_stripped.endswith(':')
+                        and len(cell_stripped) >= 3):
+                    alignments.append('center')
+                elif (cell_stripped.endswith(':')
+                      and len(cell_stripped) >= 3):
+                    alignments.append('right')
+                elif (cell_stripped.startswith(':')
+                      and len(cell_stripped) >= 3):
+                    alignments.append('left')
+                else:
+                    alignments.append('left')
+            continue
+
+        rows.append(cells)
+
+    if not rows:
+        return table_text
+
+    max_cols = max(len(r) for r in rows)
+    while len(alignments) < max_cols:
+        alignments.append('left')
+
+    parts = []
+    parts.append(
+        '<table style="border-collapse:collapse;width:100%;'
+        'margin:8px 0;font-size:0.9em;'
+        'font-family:&#39;Segoe UI&#39;,Arial,sans-serif;">'
+    )
+
+    if rows:
+        parts.append(
+            '<thead><tr style="background:#282828;'
+            'border-bottom:2px solid #ccc;">'
+        )
+        for j, cell in enumerate(rows[0]):
+            align = alignments[j] if j < len(alignments) else 'left'
+            parts.append(
+                f'<th style="padding:6px 10px;text-align:{align};'
+                f'border:1px solid #ddd;font-weight:bold;'
+                f'white-space:nowrap;">{cell}</th>'
+            )
+        parts.append('</tr></thead>')
+
+    parts.append('<tbody>')
+    for ri, row in enumerate(rows[1:]):
+        bg = '#272822' if ri % 2 == 0 else '#43453b'
+        parts.append(f'<tr style="background:{bg};">')
+        for j, cell in enumerate(row):
+            align = alignments[j] if j < len(alignments) else 'left'
+            parts.append(
+                f'<td style="padding:6px 10px;text-align:{align};'
+                f'border:1px solid #ddd;">{cell}</td>'
+            )
+        parts.append('</tr>')
+    parts.append('</tbody></table>')
+
+    return ''.join(parts)
+
+
+def _extract_markdown_tables(text: str) -> Tuple[str, List[str]]:
+    """Extract markdown tables from text, replace with placeholders."""
+    table_blocks: List[str] = []
+    lines = text.split('\n')
+    result_lines: List[str] = []
+    i = 0
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith('|') and i + 1 < len(lines):
+            next_stripped = lines[i + 1].strip()
+            if (next_stripped.startswith('|')
+                    and re.match(r'^\|[\s:|\-]+\|$', next_stripped)):
+                table_lines = [lines[i]]
+                j = i + 1
+                table_lines.append(lines[j])
+                j += 1
+                while j < len(lines):
+                    dl = lines[j].strip()
+                    if dl.startswith('|') and dl.endswith('|'):
+                        table_lines.append(lines[j])
+                        j += 1
+                    elif dl.startswith('|'):
+                        table_lines.append(lines[j])
+                        j += 1
+                    else:
+                        break
+                table_text = '\n'.join(table_lines)
+                idx = len(table_blocks)
+                table_blocks.append(table_text)
+                result_lines.append(f"\x00TB{idx}\x00")
+                i = j
+                continue
+        result_lines.append(lines[i])
+        i += 1
+
+    return '\n'.join(result_lines), table_blocks
+
+
 def format_markdown_to_html(text: str) -> str:
     if not text:
         return ""
@@ -2951,6 +3083,7 @@ def format_markdown_to_html(text: str) -> str:
     text = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
     text = re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
+    text, _html_table_blocks = _extract_markdown_tables(text)
     text = re.sub(
         r'^\s*[-*]\s+(.+)$', r'<li>\1</li>', text, flags=re.MULTILINE
     )
@@ -2960,6 +3093,10 @@ def format_markdown_to_html(text: str) -> str:
     )
     text = text.replace('\n\n', '<br><br>')
     text = text.replace('\n', '<br>')
+
+    for idx, tbl in enumerate(_html_table_blocks):
+        html_table = _convert_markdown_table_to_html(tbl)
+        text = text.replace(f"\x00TB{idx}\x00", html_table)
 
     return text
 
@@ -3013,6 +3150,8 @@ def format_markdown_to_anki_html(text: str) -> str:
         r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', result,
     )
 
+    # --- Extract markdown tables before newline conversion ---
+    result, _anki_table_blocks = _extract_markdown_tables(result)
     result = re.sub(
         r'^####\s+(.+)$', r'<h4>\1</h4>',
         result, flags=re.MULTILINE,
@@ -3088,6 +3227,11 @@ def format_markdown_to_anki_html(text: str) -> str:
     for idx, (lang, code_content) in enumerate(code_blocks):
         formatted = format_code_for_anki(code_content, lang)
         result = result.replace(f"\x00CB{idx}\x00", formatted)
+
+    # --- Restore markdown tables as styled HTML ---
+    for idx, table_text in enumerate(_anki_table_blocks):
+        html_table = _convert_markdown_table_to_html(table_text)
+        result = result.replace(f"\x00TB{idx}\x00", html_table)
 
     return result
 
