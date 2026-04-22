@@ -2378,6 +2378,25 @@ def _preprocess_standalone_separators(
             first_line = get_first_nonempty_line(stripped)
             if first_line in ('?', '??'):
                 sep_positions[idx] = first_line
+            else:
+                _lines = stripped.splitlines()
+                _in_code = False
+                for _li, _line in enumerate(_lines):
+                    if _line.strip().startswith('```'):
+                        _in_code = not _in_code
+                        continue
+                    if _in_code:
+                        continue
+                    if _line.strip() in ('?', '??') and _li > 0:
+                        _before = '\n'.join(
+                            _lines[:_li]
+                        ).strip()
+                        _after = '\n'.join(
+                            _lines[_li + 1:]
+                        ).strip()
+                        if _before and _after:
+                            sep_positions[idx] = _line.strip()
+                        break
 
     if not sep_positions:
         return blocks
@@ -2395,44 +2414,73 @@ def _preprocess_standalone_separators(
         block_text = blocks[i].strip()
         is_standalone = (block_text == separator)
 
+        # Detect embedded separator (on a non-first line within the block)
+        embedded_sep_idx = -1
+        if not is_standalone:
+            _bl = block_text.splitlines()
+            _ic = False
+            for _li, _ln in enumerate(_bl):
+                if _ln.strip().startswith('```'):
+                    _ic = not _ic
+                    continue
+                if _ic:
+                    continue
+                if _ln.strip() == separator:
+                    embedded_sep_idx = _li
+                    break
+
         # Встроенный ответ (блок вида "?\nответ...")
         if is_standalone:
             embedded_answer = ''
+            embedded_question = ''
+        elif embedded_sep_idx > 0:
+            _bl = block_text.splitlines()
+            embedded_question = '\n'.join(
+                _bl[:embedded_sep_idx]
+            ).strip()
+            embedded_answer = '\n'.join(
+                _bl[embedded_sep_idx + 1:]
+            ).strip()
         else:
             block_lines = block_text.splitlines()
             embedded_answer = '\n'.join(block_lines[1:]).strip()
+            embedded_question = ''
 
         # ── Назад: собираем вопрос ──
         question_parts: List[str] = []
         found_text = False
 
-        while result:
-            candidate = result[-1].strip()
-            if _is_hard_boundary(candidate):
-                break
-
-            is_code = candidate.startswith('```')
-
-            if is_code:
-                if found_text:
-                    # Код-блок ДО текста вопроса (в прямом порядке)
-                    # скорее всего принадлежит ответу предыдущей
-                    # карточки, а не текущему вопросу
+        if embedded_question:
+            # Embedded separator: question is already extracted,
+            # no backward scan needed
+            question_parts = [embedded_question]
+        else:
+            while result:
+                candidate = result[-1].strip()
+                if _is_hard_boundary(candidate):
                     break
-                question_parts.insert(0, result.pop())
-            elif not found_text:
-                # Первый text-блок — включаем
-                question_parts.insert(0, result.pop())
-                found_text = True
-            else:
-                # Второй text-блок — стоп (граница A/Q)
-                break
+
+                is_code = candidate.startswith('```')
+
+                if is_code:
+                    if found_text:
+                        question_parts.insert(0, result.pop())
+                        found_text = False
+                    else:
+                        question_parts.insert(0, result.pop())
+                elif not found_text:
+
+                    question_parts.insert(0, result.pop())
+                    found_text = True
+                else:
+
+                    break
 
         # ── Вперёд: собираем ответ (только standalone) ──
         answer_parts: List[str] = []
         j = i + 1
 
-        if is_standalone:
+        if is_standalone or embedded_sep_idx > 0:
             fwd_found_text = False
             while j < len(blocks):
                 if j in sep_positions:
@@ -2445,6 +2493,7 @@ def _preprocess_standalone_separators(
 
                 if is_code:
                     answer_parts.append(blocks[j])
+                    fwd_found_text = False
                     j += 1
                 elif not fwd_found_text:
                     answer_parts.append(blocks[j])
