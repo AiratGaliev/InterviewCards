@@ -122,10 +122,10 @@ class AppConfig:
 
     @staticmethod
     def _expand_path(path: str) -> str:
-        """Расширяет путь с учётом домашней директории"""
+        """Расширяет путь с учётом домашней директории и нормализует разделители."""
         if path.startswith('~'):
-            return os.path.expanduser(path)
-        return path
+            path = os.path.expanduser(path)
+        return os.path.normpath(path)
 
     @staticmethod
     def _get_platform_section() -> str:

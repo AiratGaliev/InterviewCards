@@ -15,6 +15,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class CardType(Enum):
     """Типы карточек Spaced Repetition"""
@@ -119,8 +123,8 @@ def _get_config_limits():
         }
     except Exception:
         return {
-            'max_question_length': 2000,
-            'max_answer_length': 5000,
+            'max_question_length': 10000,
+            'max_answer_length': 200000,
         }
 
 
@@ -215,14 +219,18 @@ class InterviewCard:
         if self.card_type == CardType.CLOZE and not self.cloze_deletions:
             return False
 
-        # Проверка длины полей
+        # Проверка длины полей — пишем предупреждение, но не удаляем карточку
         if len(self.question) > self.max_question_length:
-            print(f"⚠️ Вопрос слишком длинный: {len(self.question)} символов")
-            return False
+            logger.warning(
+                f"⚠️ Вопрос слишком длинный: {len(self.question)} символов "
+                f"(лимит {self.max_question_length})"
+            )
 
         if len(self.answer) > self.max_answer_length:
-            print(f"⚠️ Ответ слишком длинный: {len(self.answer)} символов")
-            return False
+            logger.warning(
+                f"⚠️ Ответ слишком длинный: {len(self.answer)} символов "
+                f"(лимит {self.max_answer_length})"
+            )
 
         return True
 

@@ -22,9 +22,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 from pygments import highlight as pygments_highlight
+from pygments.lexers import get_lexer_by_name, TexLexer
 from pygments.formatters.html import HtmlFormatter
-from pygments.lexers import get_lexer_by_name
-from pygments.lexers.text import TexLexer
 
 from models.InterviewCard import (
     InterviewCard, CardType, ClozeDeletion, SchedulingData
@@ -1819,7 +1818,13 @@ def normalize_text_key(text: str) -> str:
 def remove_scheduling_comment(text: str) -> str:
     if not text:
         return ""
-    return re.sub(PATTERNS['scheduling_comment'], '', text).strip()
+    # Удаляем только SR-комментарии в конце строки, чтобы не задеть
+    # случайный <!--...--> в середине текста.
+    # Используем PATTERNS['scheduling_comment'] (без дублирования regex)
+    return re.sub(
+        PATTERNS['scheduling_comment'] + r'\s*$',
+        '', text, flags=re.MULTILINE
+    ).strip()
 
 
 def build_cloze_question(text: str) -> str:
@@ -2316,9 +2321,11 @@ def parse_cloze_deletions(text: str) -> List[ClozeDeletion]:
 
 
 def has_cloze_deletions(text: str) -> bool:
-    """Проверяет наличие cloze-разметки ==...== вне inline code."""
+    """Проверяет наличие cloze-разметки ==...== вне inline code.
+    Не использует re.DOTALL, чтобы == из операторов сравнения
+    (например, x == true) не детектились как cloze на разных строках."""
     cleaned = _strip_all_formatting(text)
-    return bool(re.search(r'==.+?==', cleaned, re.DOTALL))
+    return bool(re.search(r'==.+?==', cleaned))
 
 
 def _is_hard_boundary(block_text: str) -> bool:
@@ -3739,10 +3746,11 @@ def generate_anki_import_file(
                and not c.is_reverse
         ]
     else:
+        # Без reverse: оба направления bidirectional карточек
+        # идут в Basic (по отдельным записям)
         extra_basic = [
             c for c in cards
             if c.card_type in BIDIRECTIONAL_CARD_TYPES
-               and not c.is_reverse
         ]
         basic_cards.extend(extra_basic)
 
