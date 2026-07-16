@@ -2,7 +2,7 @@
 
 if not exist .venv (
     echo Creating .venv directory...
-    python -m venv .venv
+    python.exe -m venv .venv
     call .venv\Scripts\activate
     echo Installing dependencies...
     python.exe -m pip install --upgrade pip setuptools wheel
@@ -10,10 +10,10 @@ if not exist .venv (
     if errorlevel 1 (
         echo Error happens. Deleting .venv directory...
         rmdir /s /q .venv
-        exit
+        exit /b
     )
 ) else (
     call .venv\Scripts\activate
 )
-python3 start_cli.py
+python.exe start_cli.py %*
 deactivate
