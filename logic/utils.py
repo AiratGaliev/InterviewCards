@@ -2973,12 +2973,12 @@ def format_code_for_anki(code: str, language: str = 'text') -> str:
     lang_label = escape_html(language)
 
     result = (
-        f'<div style="margin:8px 0;">'
+        f'<div style="text-align: left;margin:8px 0;">'
         f'<div style="background:{accent};color:#fff;'
         f'padding:2px 8px;border-radius:4px 4px 0 0;'
         f'font-size:0.75em;display:inline-block;">'
         f'{lang_label}</div>'
-        f'<pre style="background:#272822;color:#f8f8f2;'
+        f'<pre style="text-align: left;background:#272822;color:#f8f8f2;'
         f'padding:12px;border-radius:0 4px 4px 4px;'
         f'overflow-x:auto;margin:0;font-size:0.85em;'
         f'line-height:1.5;'
