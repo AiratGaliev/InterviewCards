@@ -25,6 +25,24 @@ class AnkiValidationTests(unittest.TestCase):
             self.assertEqual(report["files_checked"], 1)
             self.assertEqual(report["rows_checked"], 1)
 
+    def test_data_row_starting_with_hash_is_not_treated_as_a_header(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "heading_anki_basic.txt").write_text(
+                "#separator:tab\n"
+                "#html:true\n"
+                "#notetype:Basic\n"
+                "#deck:Interview::Java\n"
+                "#tags column:3\n"
+                "#What is a class?\tA type definition\tinterview/java\n",
+                encoding="utf-8",
+            )
+
+            report = _build_anki_validation_report(str(root))
+
+            self.assertEqual(report["error_count"], 0)
+            self.assertEqual(report["rows_checked"], 1)
+
     def test_invalid_tsv_row_is_reported(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

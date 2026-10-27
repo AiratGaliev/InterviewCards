@@ -139,12 +139,18 @@ def _build_anki_validation_report(input_dir: str) -> Dict:
             payload["files"].append(item)
             continue
 
-        headers = [line for line in lines if line.startswith("#")]
-        data_lines = [
-            (line_number, line)
-            for line_number, line in enumerate(lines, start=1)
-            if line.strip() and not line.startswith("#")
-        ]
+        headers = []
+        data_lines = []
+        data_started = False
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            if not data_started and line.startswith("#"):
+                headers.append(line)
+                continue
+            data_started = True
+            data_lines.append((line_number, line))
+
         header_values = {
             header.split(":", 1)[0]: header.split(":", 1)[1].strip()
             for header in headers
@@ -188,7 +194,7 @@ def _build_anki_validation_report(input_dir: str) -> Dict:
                 item["errors"].append(f"Строка {line_number}: пустое поле Back")
             if note_type == "Cloze" and not re.search(r"\{\{c\d+::.+?\}\}", front):
                 item["errors"].append(
-                    f"Строка {line_number}: не найден маркер Cloze формата {{cN::...}}"
+                    f"Строка {line_number}: не найден маркер Cloze формата {{{{cN::...}}}}"
                 )
 
         payload["rows_checked"] += item["row_count"]
