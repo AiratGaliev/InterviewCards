@@ -12,11 +12,15 @@ CLI версия генератора карточек InterviewCards.
 import argparse
 import json
 import os
+import re
 import sys
+from dataclasses import asdict
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from config.Config import get_config
 from logic.core import CardGenerator, GenerationResult
+from logic.utils import validate_all_files, generate_validation_report_text
 
 EXPORT_FORMAT_OPTIONS = {
     '1': ('both', 'Оба формата (Obsidian + Anki)'),
@@ -31,6 +35,193 @@ FORMAT_ALIASES = {
 }
 
 SETTINGS_FILE = '.interview_cards_settings.json'
+
+
+def _write_json_report(path: Optional[str], payload: Dict) -> None:
+    """Сохраняет машиночитаемый отчёт CI, если путь задан."""
+    if not path:
+        return
+    report_path = Path(path).expanduser()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", encoding="utf-8") as report_file:
+        json.dump(payload, report_file, ensure_ascii=False, indent=2)
+        report_file.write("\n")
+    print(f"JSON-отчёт: {report_path}")
+
+
+def _build_markdown_validation_report(input_dir: str) -> tuple:
+    """Проверяет Markdown-файлы и возвращает данные и текст отчёта."""
+    root = Path(input_dir).expanduser()
+    reports = validate_all_files(str(root)) if root.is_dir() else []
+    errors = sum(report.error_count for report in reports)
+    warnings = sum(report.warning_count for report in reports)
+    infos = sum(report.info_count for report in reports)
+    cards = sum(report.total_cards_found for report in reports)
+
+    if not root.is_dir():
+        errors += 1
+        problem = f"Каталог не найден: {root}"
+    elif not reports:
+        errors += 1
+        problem = f"В каталоге нет Markdown-файлов: {root}"
+    else:
+        problem = ""
+
+    payload = {
+        "kind": "markdown-validation",
+        "directory": str(root.resolve()) if root.exists() else str(root),
+        "files_checked": len(reports),
+        "cards_found": cards,
+        "error_count": errors,
+        "warning_count": warnings,
+        "info_count": infos,
+        "reports": [
+            {
+                "file_path": report.file_path,
+                "topic_name": report.topic_name,
+                "is_valid": report.is_valid,
+                "has_mixed_formats": report.has_mixed_formats,
+                "total_cards_found": report.total_cards_found,
+                "detected_formats": report.detected_formats,
+                "issues": [asdict(issue) for issue in report.issues],
+            }
+            for report in reports
+        ],
+    }
+    if problem:
+        payload["errors"] = [problem]
+
+    text_report = generate_validation_report_text(reports)
+    if problem:
+        text_report = f"{problem}\n\n{text_report}"
+    return payload, text_report
+
+
+def _build_anki_validation_report(input_dir: str) -> Dict:
+    """Проверяет структуру экспортированных Anki TSV-файлов."""
+    root = Path(input_dir).expanduser()
+    payload = {
+        "kind": "anki-export-validation",
+        "directory": str(root.resolve()) if root.exists() else str(root),
+        "files_checked": 0,
+        "rows_checked": 0,
+        "error_count": 0,
+        "warning_count": 0,
+        "files": [],
+        "errors": [],
+    }
+
+    if not root.is_dir():
+        payload["error_count"] = 1
+        payload["errors"].append(f"Каталог Anki-экспорта не найден: {root}")
+        return payload
+
+    files = sorted(root.rglob("*.txt"))
+    if not files:
+        payload["error_count"] = 1
+        payload["errors"].append(f"В каталоге нет Anki .txt-файлов: {root}")
+        return payload
+
+    allowed_note_types = {"Basic", "Basic (and reversed card)", "Cloze"}
+    for file_path in files:
+        item = {
+            "file_path": str(file_path),
+            "row_count": 0,
+            "note_type": "",
+            "deck": "",
+            "errors": [],
+        }
+        try:
+            lines = file_path.read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeError) as exc:
+            item["errors"].append(f"Не удалось прочитать файл: {exc}")
+            payload["error_count"] += len(item["errors"])
+            payload["files"].append(item)
+            continue
+
+        headers = [line for line in lines if line.startswith("#")]
+        data_lines = [
+            (line_number, line)
+            for line_number, line in enumerate(lines, start=1)
+            if line.strip() and not line.startswith("#")
+        ]
+        header_values = {
+            header.split(":", 1)[0]: header.split(":", 1)[1].strip()
+            for header in headers
+            if ":" in header
+        }
+
+        if header_values.get("#separator") != "tab":
+            item["errors"].append("Отсутствует или неверен заголовок #separator:tab")
+        if header_values.get("#html") != "true":
+            item["errors"].append("Отсутствует или неверен заголовок #html:true")
+
+        note_type = header_values.get("#notetype", "")
+        item["note_type"] = note_type
+        if note_type not in allowed_note_types:
+            item["errors"].append(f"Неподдерживаемый или отсутствующий note type: {note_type!r}")
+
+        deck = header_values.get("#deck", "")
+        item["deck"] = deck
+        if not deck:
+            item["errors"].append("Отсутствует заголовок #deck")
+
+        if header_values.get("#tags column") != "3":
+            item["errors"].append("Отсутствует или неверен заголовок #tags column:3")
+
+        if not data_lines:
+            item["errors"].append("Файл не содержит строк карточек")
+
+        for line_number, line in data_lines:
+            fields = line.split("\t")
+            if len(fields) != 3:
+                item["errors"].append(
+                    f"Строка {line_number}: ожидалось 3 TSV-поля, получено {len(fields)}"
+                )
+                continue
+
+            front, back, _tags = fields
+            item["row_count"] += 1
+            if not front.strip():
+                item["errors"].append(f"Строка {line_number}: пустое поле Front")
+            if note_type != "Cloze" and not back.strip():
+                item["errors"].append(f"Строка {line_number}: пустое поле Back")
+            if note_type == "Cloze" and not re.search(r"\{\{c\d+::.+?\}\}", front):
+                item["errors"].append(
+                    f"Строка {line_number}: не найден маркер Cloze формата {{cN::...}}"
+                )
+
+        payload["rows_checked"] += item["row_count"]
+        payload["error_count"] += len(item["errors"])
+        payload["files"].append(item)
+
+    payload["files_checked"] = len(files)
+    return payload
+
+
+def _clean_generated_output(generator: CardGenerator, config) -> Dict[str, int]:
+    """Удаляет только артефакты, формируемые генератором, перед полной сборкой."""
+    paths = generator.get_output_paths()
+    cards_dir = Path(paths["cards"])
+    anki_dir = Path(config.output) / "anki"
+    removed_cards = 0
+    removed_anki = 0
+
+    if cards_dir.is_dir():
+        for file_path in cards_dir.rglob("*_obsidian_cards.md"):
+            if file_path.is_file():
+                file_path.unlink()
+                removed_cards += 1
+
+    if anki_dir.is_dir():
+        for file_path in anki_dir.rglob("*_anki_*.txt"):
+            if file_path.is_file():
+                file_path.unlink()
+                removed_anki += 1
+
+    return {"obsidian_cards": removed_cards, "anki_files": removed_anki}
+
+
 
 
 def load_settings() -> Dict:
@@ -109,6 +300,32 @@ def build_parser() -> argparse.ArgumentParser:
         '--init',
         action='store_true',
         help='Создать директории и выйти',
+    )
+    validation_group = parser.add_mutually_exclusive_group()
+    validation_group.add_argument(
+        '--validate',
+        action='store_true',
+        help='Проверить все Markdown-файлы в --input-dir и завершиться',
+    )
+    validation_group.add_argument(
+        '--validate-anki-dir',
+        metavar='PATH',
+        help='Проверить все Anki .txt-файлы в каталоге и завершиться',
+    )
+    parser.add_argument(
+        '--json-report',
+        metavar='PATH',
+        help='Записать результат --validate или --validate-anki-dir в JSON',
+    )
+    parser.add_argument(
+        '--strict-warnings',
+        action='store_true',
+        help='Считать предупреждения ошибками при --validate',
+    )
+    parser.add_argument(
+        '--clean-generated-output',
+        action='store_true',
+        help='Удалить старые файлы, созданные генератором, перед полной генерацией',
     )
     return parser
 
@@ -215,12 +432,32 @@ def main():
         print("✅ Директории созданы")
         return
 
-    # Определяем параметры
+    # Определяем входной каталог до проверки, чтобы CI не запускал интерактивный режим.
     input_dir = args.input_dir
     if not input_dir:
         input_dir = saved_settings.get('input_dir') or saved_settings.get('last_input_dir')
     if not input_dir:
         input_dir = config.materials_source
+
+    if args.validate_anki_dir:
+        report = _build_anki_validation_report(args.validate_anki_dir)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        _write_json_report(args.json_report, report)
+        sys.exit(1 if report['error_count'] else 0)
+
+    if args.validate:
+        report, text_report = _build_markdown_validation_report(input_dir)
+        print(text_report)
+        print(
+            f"\nИтого: файлов={report['files_checked']}, "
+            f"карточек={report['cards_found']}, ошибок={report['error_count']}, "
+            f"предупреждений={report['warning_count']}, информации={report['info_count']}"
+        )
+        _write_json_report(args.json_report, report)
+        failed = report['error_count'] > 0 or (
+            args.strict_warnings and report['warning_count'] > 0
+        )
+        sys.exit(1 if failed else 0)
 
     saved_cats = saved_settings.get('selected_categories', None)
 
@@ -283,6 +520,13 @@ def main():
     print(f"📤 Формат: {export_format}")
     print(f"🔁 Обратные карточки: {'да' if use_reverse_cards else 'нет'}")
     print(f"🧹 Чистка дубликатов: {'да' if clean_duplicates else 'нет'}")
+    if args.clean_generated_output:
+        removed = _clean_generated_output(generator, config)
+        print(
+            "🧹 Удалены старые артефакты: "
+            f"Obsidian={removed['obsidian_cards']}, Anki={removed['anki_files']}"
+        )
+
     print("\n🚀 Начало генерации...\n")
 
     def on_progress(current, total, topic_name):

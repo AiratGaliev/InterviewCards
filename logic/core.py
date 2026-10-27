@@ -433,7 +433,8 @@ class CardGenerator:
                     )
 
         result.total_cards = len(all_cards)
-        result.success = result.total_cards > 0
+        # Частичная генерация с ошибками не считается успешной для CI.
+        result.success = result.total_cards > 0 and not result.errors
 
         return result
 

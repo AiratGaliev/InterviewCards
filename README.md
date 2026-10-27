@@ -429,6 +429,36 @@ category: python          # Язык / технология
 
 ---
 
+## Автоматизация CI
+
+CLI можно запускать без интерактивного ввода в GitHub Actions или локальном CI:
+
+```bash
+# Проверить все Markdown-материалы; JSON-отчёт содержит ошибки, предупреждения и найденные карточки.
+python start_cli.py --validate \
+  --input-dir "/path/to/Interview/Materials" \
+  --json-report reports/materials-validation.json
+
+# Пересобрать производные файлы Obsidian и Anki из исходных материалов.
+# Удаляются только файлы с именами, соответствующими шаблонам генератора.
+python start_cli.py \
+  --input-dir "/path/to/Interview/Materials" \
+  --category \
+  --format both \
+  --clean-generated-output
+
+# Проверить сгенерированные Markdown-превью.
+python start_cli.py --validate \
+  --input-dir "/path/to/Interview/Cards" \
+  --json-report reports/cards-validation.json
+
+# Проверить структуру Anki TSV-файлов.
+python start_cli.py --validate-anki-dir "/path/to/output/anki" \
+  --json-report reports/anki-validation.json
+```
+
+Команда `--validate` завершается с кодом `1`, если каталог не существует, не содержит Markdown-файлов или валидатор обнаружил ошибки. `--strict-warnings` дополнительно делает предупреждения блокирующими. Проверки не переписывают исходные материалы. `--clean-generated-output` предназначена для детерминированной пересборки производных карточек и не исправляет смысловые ошибки исходного текста: такие проблемы должны исправляться в исходных Markdown-файлах и повторно проверяться.
+
 ## 🔍 Устранение неполадок
 
 | Проблема                 | Решение                                                                                                                 |
