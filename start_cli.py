@@ -145,7 +145,14 @@ def _build_anki_validation_report(input_dir: str) -> Dict:
         for line_number, line in enumerate(lines, start=1):
             if not line.strip():
                 continue
-            if not data_started and line.startswith("#"):
+            is_export_header = line.startswith((
+                "#separator:",
+                "#html:",
+                "#notetype:",
+                "#deck:",
+                "#tags column:",
+            ))
+            if not data_started and is_export_header:
                 headers.append(line)
                 continue
             data_started = True
